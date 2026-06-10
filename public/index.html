@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Lead Agent v7</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;500;600&display=swap" rel="stylesheet"/>
+<style>
+:root{
+  --bg:#0c0c0e;--surface:#131316;--surface2:#1a1a1f;
+  --border:#222228;--border-hi:#333340;
+  --text:#e8e8f0;--muted:#666680;--dim:#2a2a35;
+  --accent:#7c6aff;--accent-dim:#1e1a3a;
+  --green:#22c55e;--green-dim:#0f2a1a;
+  --amber:#f59e0b;--amber-dim:#2a1e08;
+  --red:#ef4444;--red-dim:#2a0f0f;
+  --blue:#38bdf8;--blue-dim:#0a1f2e;
+  --mono:'DM Mono',monospace;--sans:'Syne',sans-serif;--r:8px;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:100vh}
+body{max-width:920px;margin:0 auto;padding:2rem 1.5rem 4rem}
+
+.header{margin-bottom:2rem}
+.header-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.logo{font-size:22px;font-weight:600;letter-spacing:-0.5px}
+.logo span{color:var(--accent)}
+.badges{display:flex;gap:8px}
+.badge{font-family:var(--mono);font-size:11px;color:var(--muted);background:var(--surface);border:1px solid var(--border);padding:3px 10px;border-radius:20px}
+.badge.g{color:var(--green);border-color:#1a4a2a;background:var(--green-dim)}
+.header p{font-size:13px;color:var(--muted)}
+
+.tabs{display:flex;border-bottom:1px solid var(--border);margin-bottom:1.5rem}
+.tab{font-family:var(--mono);font-size:12px;padding:8px 16px;background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;margin-bottom:-1px;transition:color .15s}
+.tab:hover{color:var(--text)}
+.tab.on{color:var(--accent);border-bottom-color:var(--accent)}
+.tab-count{display:inline-block;background:var(--accent-dim);color:var(--accent);border-radius:20px;padding:0 6px;font-size:10px;margin-left:4px}
+
+.form-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:1.25rem;margin-bottom:1.25rem}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}
+.fg{display:flex;flex-direction:column;gap:5px}
+.fg.full{grid-column:1/-1}
+label{font-family:var(--mono);font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em}
+input,select{background:var(--bg);border:1px solid var(--border);border-radius:var(--r);padding:9px 11px;font-size:13px;font-family:var(--sans);color:var(--text);width:100%;transition:border-color .15s}
+input:focus,select:focus{outline:none;border-color:var(--accent)}
+input::placeholder{color:var(--dim)}
+input[type=range]{padding:6px 0;height:28px;accent-color:var(--accent)}
+
+.slider-row{display:flex;align-items:center;gap:8px}
+.slider-row input[type=range]{flex:1}
+.slider-val{font-family:var(--mono);font-size:12px;color:var(--accent);min-width:36px;text-align:right}
+
+.lang-toggle{display:flex;gap:4px}
+.lang-btn{font-family:var(--mono);font-size:11px;padding:5px 12px;border:1px solid var(--border);border-radius:20px;background:transparent;color:var(--muted);cursor:pointer;transition:all .15s}
+.lang-btn:hover{border-color:var(--border-hi);color:var(--text)}
+.lang-btn.on{background:var(--accent-dim);border-color:var(--accent);color:var(--accent)}
+
+.btn-row{display:flex;gap:8px;align-items:center;margin-top:4px}
+.btn{font-family:var(--sans);font-size:13px;font-weight:500;padding:9px 18px;border-radius:var(--r);border:1px solid var(--border);cursor:pointer;background:transparent;color:var(--text);transition:all .15s;display:inline-flex;align-items:center;gap:7px}
+.btn:hover{border-color:var(--border-hi);background:var(--surface2)}
+.btn:disabled{opacity:.35;cursor:not-allowed}
+.btn-p{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn-p:hover{opacity:.88;background:var(--accent)}
+.btn-sm{font-size:11px;padding:4px 11px;font-family:var(--mono)}
+.btn-ghost{color:var(--muted)}
+
+.status{display:flex;align-items:center;gap:8px;min-height:26px;font-size:12px;color:var(--muted);font-family:var(--mono);margin-top:10px}
+.spin{width:12px;height:12px;border:1.5px solid var(--border-hi);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;flex-shrink:0}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.err{background:var(--red-dim);border:1px solid var(--red);border-radius:var(--r);padding:10px 14px;font-size:12px;color:var(--red);font-family:var(--mono);margin-top:10px;line-height:1.6}
+.summary-bar{font-family:var(--mono);font-size:12px;color:var(--muted);background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:9px 13px;margin-bottom:14px}
+
+.leads{display:flex;flex-direction:column;gap:10px}
+.lead{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:1.1rem 1.25rem;transition:border-color .15s;animation:up .25s ease both}
+.lead:hover{border-color:var(--border-hi)}
+@keyframes up{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+
+.lead-top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px}
+.lead-left{flex:1;min-width:0}
+.lead-name{font-size:14px;font-weight:600;margin-bottom:3px}
+.lead-addr{font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lead-right{display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex-shrink:0}
+.score-badge{font-family:var(--mono);font-size:13px;font-weight:500;padding:3px 11px;border-radius:20px}
+.hi{background:var(--green-dim);color:var(--green);border:1px solid #1a4a2a}
+.mid{background:var(--amber-dim);color:var(--amber);border:1px solid #3a2a08}
+.lo{background:var(--red-dim);color:var(--red);border:1px solid #3a1010}
+.maps-link{font-family:var(--mono);font-size:10px;color:var(--blue);text-decoration:none}
+.maps-link:hover{text-decoration:underline}
+
+.meta-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+.chip{font-family:var(--mono);font-size:11px;padding:2px 8px;border:1px solid var(--border);border-radius:20px;color:var(--muted)}
+.chip.web{color:var(--blue);border-color:#1a3a4a;background:var(--blue-dim)}
+.chip.phone{color:var(--green);border-color:#1a4a2a;background:var(--green-dim)}
+.chip.noweb{color:var(--amber);border-color:#3a2a08;background:var(--amber-dim)}
+.chip.lang{color:var(--accent);border-color:var(--accent-dim);background:var(--accent-dim)}
+
+.lbl{font-family:var(--mono);font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px}
+.pain{font-size:13px;color:#aab;line-height:1.6;margin-bottom:12px}
+.pitch-box{background:var(--bg);border:1px solid var(--border);border-left:2px solid var(--accent);border-radius:var(--r);padding:10px 13px;font-size:13px;line-height:1.7;margin-bottom:12px}
+.lead-actions{display:flex;flex-wrap:wrap;gap:7px;align-items:center}
+.save-btn{background:var(--accent-dim);border-color:var(--accent);color:var(--accent)}
+.save-btn:hover{background:var(--accent);color:#fff}
+.save-btn.saved{background:var(--green-dim);border-color:var(--green);color:var(--green);cursor:default}
+
+.shortlist{display:flex;flex-direction:column;gap:10px}
+.sl-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:1rem 1.25rem}
+.sl-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px}
+.sl-name{font-size:14px;font-weight:600}
+.sl-meta{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:2px}
+.status-row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+.status-btn{font-family:var(--mono);font-size:11px;padding:3px 10px;border-radius:20px;border:1px solid var(--border);background:transparent;color:var(--muted);cursor:pointer;transition:all .15s}
+.status-btn:hover{border-color:var(--border-hi);color:var(--text)}
+.status-btn.active-new{background:var(--surface2);color:var(--text);border-color:var(--border-hi)}
+.status-btn.active-contacted{background:var(--blue-dim);color:var(--blue);border-color:#1a3a4a}
+.status-btn.active-responded{background:var(--amber-dim);color:var(--amber);border-color:#3a2a08}
+.status-btn.active-closed{background:var(--green-dim);color:var(--green);border-color:#1a4a2a}
+.status-btn.active-skip{background:var(--red-dim);color:var(--red);border-color:#3a1010}
+.sl-pitch{font-size:12px;color:#aab;line-height:1.6;font-family:var(--mono);background:var(--bg);border-radius:var(--r);padding:8px 10px;margin-bottom:8px}
+.sl-footer{display:flex;gap:7px;align-items:center}
+
+.explain p{font-size:13px;color:#aab;line-height:1.8;margin-bottom:14px}
+.explain strong{color:var(--text)}
+.explain code{font-family:var(--mono);font-size:12px;background:var(--surface);border:1px solid var(--border);padding:1px 6px;border-radius:4px;color:var(--accent)}
+.flow-box{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:1rem;font-family:var(--mono);font-size:12px;color:#aab;line-height:1.9;margin-bottom:14px;white-space:pre;overflow-x:auto}
+.empty{font-family:var(--mono);font-size:13px;color:var(--muted);padding:2rem;text-align:center;border:1px dashed var(--border);border-radius:var(--r)}
+.divider{border:none;border-top:0.5px solid var(--border);margin:12px 0}
+
+@media(max-width:560px){.form-grid{grid-template-columns:1fr}.fg.full{grid-column:1}}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-row">
+    <div class="logo">lead<span>.</span>agent <span style="font-size:14px;color:var(--muted);font-weight:400">v7</span></div>
+    <div class="badges">
+      <span class="badge g">universal</span>
+      <span class="badge">maps + claude</span>
+    </div>
+  </div>
+  <p>Any niche, any city, any language. Google Maps discovery → Claude scoring → Excel export.</p>
+</div>
+
+<div class="tabs">
+  <button class="tab on" onclick="switchTab('search',this)">search</button>
+  <button class="tab" onclick="switchTab('saved',this)">shortlist <span class="tab-count" id="saved-count">0</span></button>
+  <button class="tab" onclick="switchTab('explain',this)">how it works</button>
+</div>
+
+<!-- SEARCH TAB -->
+<div id="t-search">
+  <div class="form-card">
+    <div class="form-grid">
+      <div class="fg"><label>Niche</label><input id="niche" value="clinics" placeholder="clinics, cafes, gyms, coaching..."/></div>
+      <div class="fg"><label>City</label><input id="city" value="Indore, Madhya Pradesh" placeholder="Raipur, Indore, Bhopal..."/></div>
+      <div class="fg full"><label>Your service</label><input id="service" value="modern website redesign and workflow automation"/></div>
+
+      <!-- Min rating slider -->
+      <div class="fg">
+        <label>Min rating</label>
+        <div class="slider-row">
+          <input type="range" id="min-rating" min="3.0" max="5.0" step="0.1" value="4.0" oninput="document.getElementById('rating-val').textContent=parseFloat(this.value).toFixed(1)+'★'"/>
+          <span class="slider-val" id="rating-val">4.0★</span>
+        </div>
+      </div>
+
+      <!-- Min reviews slider -->
+      <div class="fg">
+        <label>Min reviews</label>
+        <div class="slider-row">
+          <input type="range" id="min-reviews" min="10" max="300" step="10" value="50" oninput="document.getElementById('reviews-val').textContent=this.value+'+'"/>
+          <span class="slider-val" id="reviews-val">50+</span>
+        </div>
+      </div>
+
+      <!-- Leads count -->
+      <div class="fg">
+        <label>Leads to find</label>
+        <select id="count">
+          <option value="3">3 leads</option>
+          <option value="5" selected>5 leads</option>
+          <option value="8">8 leads</option>
+          <option value="10">10 leads</option>
+        </select>
+      </div>
+
+      <!-- Language toggle -->
+      <div class="fg">
+        <label>Pitch language</label>
+        <div class="lang-toggle">
+          <button class="lang-btn on" data-lang="english" onclick="setLang(this)">English</button>
+          <button class="lang-btn" data-lang="hinglish" onclick="setLang(this)">Hinglish</button>
+          <button class="lang-btn" data-lang="hindi" onclick="setLang(this)">Hindi</button>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="btn-row">
+      <button class="btn btn-p" id="runbtn" onclick="run()">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        Find leads
+      </button>
+      <button class="btn btn-ghost btn-sm" id="clrbtn" style="display:none" onclick="clearResults()">clear</button>
+      <button class="btn btn-ghost btn-sm" onclick="resetSeen()">reset seen</button>
+      <span id="seen-info" style="font-family:var(--mono);font-size:11px;color:var(--muted)"></span>
+    </div>
+    <div class="status" id="status"></div>
+    <div id="errs"></div>
+  </div>
+  <div id="summary-area"></div>
+  <div class="leads" id="leads-area"></div>
+</div>
+
+<!-- SHORTLIST TAB -->
+<div id="t-saved" style="display:none">
+  <div class="shortlist" id="shortlist-area">
+    <div class="empty">// no leads saved yet — find leads and hit "+ save to shortlist"</div>
+  </div>
+</div>
+
+<!-- EXPLAIN TAB -->
+<div id="t-explain" style="display:none" class="explain">
+  <p><strong>What's new in v7</strong></p>
+  <div class="flow-box">// Dynamic niche prompts
+"clinics"   → Claude knows: no booking, patients search at night
+"cafes"     → Claude knows: no menu, Zomato commission, pre-orders
+"gyms"      → Claude knows: no class schedule, no membership inquiry
+"coaching"  → Claude knows: no enrollment, fees not visible online
+// Any niche → correct pitch angle, automatically
+
+// Adjustable filters
+Rating slider  → 3.0 to 5.0 (tune per city size)
+Reviews slider → 10 to 300 (smaller towns need lower threshold)
+
+// Language toggle
+English   → professional outreach
+Hinglish  → converts better for tier 2/3 Indian cities
+Hindi     → full Devanagari for local businesses</div>
+
+  <p><strong>The full pipeline</strong><br/>
+  Browser → <code>POST /api/leads</code> with niche, city, filters, language → Google Maps text search (3 pages, 60 raw) → filter by your rating + review thresholds → shuffle for variety → Place Details for phone + website → Claude with niche-specific prompt + language instruction → ranked lead cards with copy-as-text.</p>
+
+  <p><strong>Copy as text</strong><br/>
+  Each lead has a "copy as text" button. It formats the lead as a clean WhatsApp-ready block — name, phone, rating, address, pitch. Paste directly into WhatsApp or any CRM.</p>
+
+  <p><strong>Shortlist persistence</strong><br/>
+  Saved leads write to <code>shortlist.json</code> on disk + <code>leads.xlsx</code> for Excel. Server restarts won't lose your shortlist. Excel file records the pitch language used.</p>
+</div>
+
+<script>
+let currentLeads = [];
+let savedLeads   = {};
+let activeLang   = 'english';
+
+function switchTab(id, el) {
+  ['search','saved','explain'].forEach(t => {
+    document.getElementById('t-'+t).style.display = t===id ? 'block' : 'none';
+  });
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('on'));
+  el.classList.add('on');
+  if (id==='saved') renderShortlist();
+}
+
+function setLang(btn) {
+  document.querySelectorAll('.lang-btn').forEach(b => b.classList.remove('on'));
+  btn.classList.add('on');
+  activeLang = btn.dataset.lang;
+}
+
+function setStatus(msg, loading) {
+  document.getElementById('status').innerHTML = loading
+    ? `<div class="spin"></div><span>${msg}</span>`
+    : msg ? `<span>${msg}</span>` : '';
+}
+
+function sc(n) { return n>=8?'hi':n>=5?'mid':'lo'; }
+
+function clearResults() {
+  currentLeads = [];
+  document.getElementById('leads-area').innerHTML   = '';
+  document.getElementById('summary-area').innerHTML = '';
+  document.getElementById('errs').innerHTML         = '';
+  document.getElementById('clrbtn').style.display   = 'none';
+  setStatus('');
+}
+
+// Copy full lead as WhatsApp-ready text block
+function copyAsText(lead, btn) {
+  const lines = [
+    `*${lead.name}*`,
+    lead.phone    ? `📞 ${lead.phone}`   : '📞 No phone found',
+    lead.website  ? `🌐 ${lead.website}` : '🌐 No website',
+    `⭐ ${lead.rating || '?'} (${lead.reviewCount || 0} reviews)`,
+    lead.address  ? `📍 ${lead.address}` : '',
+    '',
+    lead.pitch || '',
+    '',
+    lead.googleMapsUrl || ''
+  ].filter(l => l !== undefined);
+  navigator.clipboard.writeText(lines.join('\n')).then(() => {
+    btn.textContent = 'copied!';
+    setTimeout(() => btn.textContent = 'copy as text', 1500);
+  });
+}
+
+function copyPitch(pitch, btn) {
+  navigator.clipboard.writeText(pitch).then(() => {
+    btn.textContent = 'copied!';
+    setTimeout(() => btn.textContent = 'copy pitch', 1500);
+  });
+}
+
+async function saveLead(idx, btn) {
+  const lead = currentLeads[idx];
+  if (!lead) return;
+  try {
+    await fetch('/api/saved', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(lead)
+    });
+    savedLeads[lead.id] = { ...lead, status: 'new' };
+    btn.textContent = '✓ saved';
+    btn.classList.add('saved');
+    btn.disabled = true;
+    updateSavedCount();
+  } catch { btn.textContent = 'error'; }
+}
+
+function updateSavedCount() {
+  document.getElementById('saved-count').textContent = Object.keys(savedLeads).length;
+}
+
+async function setLeadStatus(id, status, rowEl) {
+  await fetch(`/api/saved/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status })
+  });
+  savedLeads[id] = { ...savedLeads[id], status };
+  rowEl.querySelectorAll('.status-btn').forEach(b => {
+    b.className = 'status-btn';
+    if (b.dataset.status === status) b.classList.add('active-' + status);
+  });
+}
+
+async function removeLead(id) {
+  await fetch(`/api/saved/${id}`, { method: 'DELETE' });
+  delete savedLeads[id];
+  updateSavedCount();
+  renderShortlist();
+}
+
+function renderLeads(leads, summary) {
+  if (summary) {
+    document.getElementById('summary-area').innerHTML =
+      `<div class="summary-bar">// ${summary}</div>`;
+  }
+  const area = document.getElementById('leads-area');
+  area.innerHTML = '';
+  leads.sort((a,b) => b.score - a.score).forEach((lead, i) => {
+    const s      = lead.score || 0;
+    const isSaved = !!savedLeads[lead.id];
+    const div    = document.createElement('div');
+    div.className = 'lead';
+    div.style.animationDelay = (i * 0.06) + 's';
+    div.innerHTML = `
+      <div class="lead-top">
+        <div class="lead-left">
+          <div class="lead-name">${lead.name}</div>
+          <div class="lead-addr">${lead.address || ''}</div>
+        </div>
+        <div class="lead-right">
+          <span class="score-badge ${sc(s)}">${s}/10</span>
+          ${lead.googleMapsUrl ? `<a class="maps-link" href="${lead.googleMapsUrl}" target="_blank">view on maps ↗</a>` : ''}
+        </div>
+      </div>
+      <div class="meta-row">
+        ${lead.website
+          ? `<span class="chip web">🌐 ${lead.website.replace(/^https?:\/\//,'').split('/')[0]}</span>`
+          : `<span class="chip noweb">⚠ no website</span>`}
+        ${lead.phone    ? `<span class="chip phone">📞 ${lead.phone}</span>`                 : ''}
+        ${lead.rating   ? `<span class="chip">⭐ ${lead.rating} (${lead.reviewCount})</span>` : ''}
+        ${lead.type     ? `<span class="chip">${lead.type}</span>`                            : ''}
+        ${lead.language && lead.language!=='english' ? `<span class="chip lang">${lead.language}</span>` : ''}
+      </div>
+      <div class="lbl">pain points</div>
+      <div class="pain">${lead.painPoints || '—'}</div>
+      <div class="lbl">your pitch</div>
+      <div class="pitch-box">${lead.pitch || '—'}</div>
+      <div class="lbl">score reason</div>
+      <div class="pain" style="margin-bottom:12px">${lead.scoreReason || '—'}</div>
+      <div class="lead-actions">
+        <button class="btn btn-sm save-btn ${isSaved?'saved':''}" ${isSaved?'disabled':''} data-idx="${i}">
+          ${isSaved ? '✓ saved' : '+ save to shortlist'}
+        </button>
+        <button class="btn btn-sm btn-ghost" data-copy-pitch="${i}">copy pitch</button>
+        <button class="btn btn-sm btn-ghost" data-copy-text="${i}">copy as text</button>
+      </div>`;
+
+    div.querySelector('.save-btn').addEventListener('click', function() { saveLead(i, this); });
+    div.querySelector('[data-copy-pitch]').addEventListener('click', function() { copyPitch(lead.pitch||'', this); });
+    div.querySelector('[data-copy-text]').addEventListener('click', function() { copyAsText(lead, this); });
+
+    area.appendChild(div);
+  });
+  document.getElementById('clrbtn').style.display = 'inline-flex';
+}
+
+function renderShortlist() {
+  const area    = document.getElementById('shortlist-area');
+  const leads   = Object.values(savedLeads);
+  const statuses = ['new','contacted','responded','closed','skip'];
+  if (!leads.length) {
+    area.innerHTML = '<div class="empty">// no leads saved yet</div>';
+    return;
+  }
+  area.innerHTML = leads.map(lead => `
+    <div class="sl-card">
+      <div class="sl-top">
+        <div>
+          <div class="sl-name">${lead.name}</div>
+          <div class="sl-meta">
+            ${lead.phone||'no phone'} &nbsp;·&nbsp;
+            ${lead.website ? lead.website.replace(/^https?:\/\//,'').split('/')[0] : 'no website'} &nbsp;·&nbsp;
+            score ${lead.score}/10
+            ${lead.language && lead.language!=='english' ? ` · ${lead.language}` : ''}
+          </div>
+        </div>
+        <span class="score-badge ${sc(lead.score||0)}">${lead.score}/10</span>
+      </div>
+      <div class="lbl">pipeline status</div>
+      <div class="status-row" id="sr-${lead.id}">
+        ${statuses.map(s => `<button class="status-btn ${lead.status===s?'active-'+s:''}" data-status="${s}">${s}</button>`).join('')}
+      </div>
+      <div class="lbl">pitch</div>
+      <div class="sl-pitch">${lead.pitch||'—'}</div>
+      <div class="sl-footer">
+        ${lead.googleMapsUrl ? `<a class="btn btn-sm" href="${lead.googleMapsUrl}" target="_blank" style="text-decoration:none">maps ↗</a>` : ''}
+        <button class="btn btn-sm btn-ghost" data-sl-pitch="${lead.id}">copy pitch</button>
+        <button class="btn btn-sm btn-ghost" data-sl-text="${lead.id}">copy as text</button>
+        <button class="btn btn-sm btn-ghost" style="color:var(--red)" data-remove="${lead.id}">remove</button>
+      </div>
+    </div>`).join('');
+
+  leads.forEach(lead => {
+    const row = document.getElementById('sr-'+lead.id);
+    if (row) row.querySelectorAll('.status-btn').forEach(btn => {
+      btn.addEventListener('click', () => setLeadStatus(lead.id, btn.dataset.status, row));
+    });
+  });
+
+  area.querySelectorAll('[data-sl-pitch]').forEach(btn => {
+    const lead = savedLeads[btn.dataset.slPitch];
+    if (lead) btn.addEventListener('click', () => copyPitch(lead.pitch||'', btn));
+  });
+  area.querySelectorAll('[data-sl-text]').forEach(btn => {
+    const lead = savedLeads[btn.dataset.slText];
+    if (lead) btn.addEventListener('click', () => copyAsText(lead, btn));
+  });
+  area.querySelectorAll('[data-remove]').forEach(btn => {
+    btn.addEventListener('click', () => removeLead(btn.dataset.remove));
+  });
+}
+
+async function resetSeen() {
+  await fetch('/api/seen', { method: 'DELETE' });
+  document.getElementById('seen-info').textContent = '// seen leads reset';
+  setTimeout(() => loadSeenCount(), 1500);
+}
+
+async function loadSeenCount() {
+  try {
+    const d = await fetch('/api/seen/count').then(r=>r.json());
+    document.getElementById('seen-info').textContent = d.count > 0 ? `// ${d.count} seen` : '';
+  } catch {}
+}
+
+async function run() {
+  const niche   = document.getElementById('niche').value.trim();
+  const city    = document.getElementById('city').value.trim();
+  const service = document.getElementById('service').value.trim();
+  const count   = document.getElementById('count').value;
+  const minRating  = parseFloat(document.getElementById('min-rating').value);
+  const minReviews = parseInt(document.getElementById('min-reviews').value);
+
+  if (!niche || !city || !service) {
+    document.getElementById('errs').innerHTML = '<div class="err">// fill in niche, city, and service first.</div>';
+    return;
+  }
+
+  document.getElementById('errs').innerHTML         = '';
+  document.getElementById('leads-area').innerHTML   = '';
+  document.getElementById('summary-area').innerHTML = '';
+  document.getElementById('clrbtn').style.display   = 'none';
+
+  const btn = document.getElementById('runbtn');
+  btn.disabled = true;
+  setStatus(`searching google maps for ${count} ${niche} in ${city}...`, true);
+
+  try {
+    const res  = await fetch('/api/leads', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ niche, city, service, count, minRating, minReviews, language: activeLang })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `server error ${res.status}`);
+
+    setStatus(`claude scoring in ${activeLang}...`, true);
+    currentLeads = data.leads || [];
+    if (!currentLeads.length) throw new Error('no leads returned — try different filters.');
+    renderLeads(currentLeads, data.summary);
+    setStatus(`${currentLeads.length} leads found — sorted by score.`);
+    loadSeenCount();
+
+  } catch(err) {
+    setStatus('');
+    document.getElementById('errs').innerHTML = `<div class="err">// ${err.message}</div>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// Load on startup
+fetch('/api/saved').then(r=>r.json()).then(d => {
+  (d.saved||[]).forEach(l => savedLeads[l.id] = l);
+  updateSavedCount();
+}).catch(()=>{});
+loadSeenCount();
+</script>
+</body>
+</html>

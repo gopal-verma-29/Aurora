@@ -1,0 +1,153 @@
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@300;400;500;600&display=swap');
+
+/* ── Aurora Design System ─────────────────────────────────────── */
+:root {
+  --bg:             #060610;
+  --surface:        #0a0a18;
+  --card:           #0e0e1e;
+  --card-hover:     #121228;
+  --border:         #1a1a32;
+  --border-bright:  #2e2e52;
+  --accent:         #7c5cff;
+  --accent-dim:     rgba(124,92,255,0.12);
+  --accent-glow:    rgba(124,92,255,0.4);
+  --accent-bright:  #9d82ff;
+  --cyan:           #00e5ff;
+  --cyan-dim:       rgba(0,229,255,0.1);
+  --cyan-glow:      rgba(0,229,255,0.3);
+  --green:          #00e875;
+  --green-dim:      rgba(0,232,117,0.12);
+  --amber:          #ffc200;
+  --amber-dim:      rgba(255,194,0,0.12);
+  --red:            #ff3d5a;
+  --red-dim:        rgba(255,61,90,0.12);
+  --text:           #e8e8fc;
+  --text-muted:     #6868a0;
+  --text-dim:       #32325a;
+  --font-display:   'Syne', sans-serif;
+  --font-body:      'Outfit', sans-serif;
+  --font-mono:      'JetBrains Mono', monospace;
+  --radius-sm:      8px;
+  --radius-md:      12px;
+  --radius-lg:      18px;
+  --radius-xl:      24px;
+}
+
+/* ── Reset ────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { font-size: 16px; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+/* ── Scrollbar ────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+/* ── Typography ───────────────────────────────────────────────── */
+h1, h2, h3 { font-family: var(--font-display); font-weight: 700; }
+
+code, pre, .mono {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
+
+/* ── Global Animations ────────────────────────────────────────── */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 0 0 var(--accent-glow); }
+  50%       { box-shadow: 0 0 0 8px transparent; }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.4; transform: scale(0.8); }
+}
+
+@keyframes scan-line {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+@keyframes aurora-drift {
+  0%   { transform: translate(0, 0) scale(1); }
+  33%  { transform: translate(30px, -20px) scale(1.05); }
+  66%  { transform: translate(-20px, 10px) scale(0.97); }
+  100% { transform: translate(0, 0) scale(1); }
+}
+
+@keyframes aurora-drift-2 {
+  0%   { transform: translate(0, 0) scale(1); }
+  33%  { transform: translate(-40px, 30px) scale(1.08); }
+  66%  { transform: translate(20px, -15px) scale(0.95); }
+  100% { transform: translate(0, 0) scale(1); }
+}
+
+@keyframes count-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+/* ── Utility ──────────────────────────────────────────────────── */
+.aurora-glow {
+  box-shadow: 0 0 24px var(--accent-glow), 0 0 48px rgba(124,92,255,0.1);
+}
+
+.fade-up {
+  animation: fadeUp 0.4s ease both;
+}
+
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+button { font-family: var(--font-body); }
+
+/* ── Range Input ──────────────────────────────────────────────── */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  background: var(--border-bright);
+  border-radius: 2px;
+  cursor: pointer;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent-glow);
+  cursor: pointer;
+}

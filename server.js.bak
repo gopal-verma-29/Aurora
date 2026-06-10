@@ -1,0 +1,565 @@
+// server.js — v7 (universal: dynamic prompts, filter params, language toggle)
+//
+// NEW IN v7:
+//   1. Dynamic niche prompt — Claude gets niche-specific pain points, pitches correctly for any business
+//   2. Parameterised filters — minRating + minReviews from UI, no more hardcoded constants
+//   3. Language toggle — English / Hinglish / Hindi pitch output based on request param
+//
+// FLOW:
+//   Browser → Google Maps (60 raw results, filtered by UI thresholds)
+//           → Claude (niche-aware prompt + language instruction)
+//           → shortlist + Excel export
+
+import 'dotenv/config';
+import express from 'express';
+import Anthropic from '@anthropic-ai/sdk';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+import { readFileSync, writeFileSync, existsSync } from 'fs';
+
+let ExcelJS;
+try { ExcelJS = (await import('exceljs')).default; }
+catch { console.warn('[Excel] run: npm install exceljs'); }
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const app = express();
+app.use(express.json());
+// In development: React runs on Vite dev server (:5173) with proxy to this server
+// In production: serve the built React app from client/dist
+const clientDist = join(__dirname, 'client', 'dist')
+if (existsSync(clientDist)) {
+  app.use(express.static(clientDist))
+  console.log('[Static] Serving React build from client/dist')
+} else {
+  // Fallback to old public folder during transition
+  app.use(express.static(join(__dirname, 'public')))
+}
+
+const client   = new Anthropic();
+const MAPS_KEY = process.env.GOOGLE_MAPS_KEY;
+
+// ─── SHORTLIST ────────────────────────────────────────────────────────────────
+const SHORTLIST_PATH = './shortlist.json';
+
+function loadShortlist() {
+  try {
+    const data = JSON.parse(readFileSync(SHORTLIST_PATH, 'utf8'));
+    return new Map(data.map(l => [l.id, l]));
+  } catch { return new Map(); }
+}
+
+function saveShortlist(map) {
+  writeFileSync(SHORTLIST_PATH, JSON.stringify([...map.values()], null, 2));
+}
+
+const shortlist = loadShortlist();
+console.log(`[Shortlist] Loaded ${shortlist.size} saved leads`);
+
+// ─── SEEN LEADS ───────────────────────────────────────────────────────────────
+const SEEN_PATH = './seen-leads.json';
+function loadSeen() {
+  try { return new Set(JSON.parse(readFileSync(SEEN_PATH, 'utf8'))); }
+  catch { return new Set(); }
+}
+function saveSeen(s) { writeFileSync(SEEN_PATH, JSON.stringify([...s])); }
+let seenLeads = loadSeen();
+console.log(`[Seen] ${seenLeads.size} previously seen businesses`);
+
+// ─── EXCEL EXPORT ─────────────────────────────────────────────────────────────
+const EXCEL_PATH  = './leads.xlsx';
+const EXCEL_HEADS = ['Name','Type','Address','Phone','Website','Score','Score Reason','Pain Points','Pitch','Maps URL','Language','Status','Saved At'];
+
+async function appendLeadToExcel(lead) {
+  if (!ExcelJS) return;
+  const wb = new ExcelJS.Workbook();
+  if (existsSync(EXCEL_PATH)) {
+    try { await wb.xlsx.readFile(EXCEL_PATH); }
+    catch {
+      // Corrupted file — delete and start fresh
+      const { unlinkSync } = await import('fs');
+      unlinkSync(EXCEL_PATH);
+    }
+  }
+  let ws = wb.getWorksheet('Leads');
+  if (!ws) {
+    ws = wb.addWorksheet('Leads');
+    const hr = ws.addRow(EXCEL_HEADS);
+    hr.font = { bold: true };
+    const widths = [28,12,35,18,30,8,40,45,60,50,12,14,22];
+    ws.columns = EXCEL_HEADS.map((h,i) => ({ header:h, width:widths[i] }));
+  }
+  ws.addRow([
+    lead.name||'', lead.type||'', lead.address||'', lead.phone||'',
+    lead.website||'', lead.score||'', lead.scoreReason||'',
+    lead.painPoints||'', lead.pitch||'', lead.googleMapsUrl||'',
+    lead.language||'english', 'new', new Date().toLocaleString('en-IN')
+  ]);
+  await wb.xlsx.writeFile(EXCEL_PATH);
+}
+
+// ─── NICHE CONTEXT MAP ────────────────────────────────────────────────────────
+// Maps niche keywords → specific pain points for that business type.
+// Claude uses this to write accurate pitches — not generic "you need a website" copy.
+// Add more niches here as you expand to new markets.
+const NICHE_CONTEXT = {
+  // Healthcare
+  clinic:      'Pain points: no online appointment booking, patients search at night and find competitors, no way to verify credentials or see services online.',
+  clinics:     'Pain points: no online appointment booking, patients search at night and find competitors, no way to verify credentials or see services online.',
+  hospital:    'Pain points: no department listing, no OPD schedule online, patients call for basic info (wastes staff time), no doctor profiles.',
+  hospitals:   'Pain points: no department listing, no OPD schedule online, patients call for basic info (wastes staff time), no doctor profiles.',
+  dentist:     'Pain points: patients research dentists online before visiting, no before/after gallery, no appointment booking, anxiety patients need trust signals.',
+  dental:      'Pain points: patients research dentists online before visiting, no before/after gallery, no appointment booking, anxiety patients need trust signals.',
+  pharmacy:    'Pain points: no medicine availability checker, no home delivery option visible, customers go to competitors with apps.',
+  doctor:      'Pain points: no online consultation option, patients cannot verify qualifications, no appointment system.',
+
+  // Food & beverage
+  restaurant:  'Pain points: no online menu, no table reservation system, food delivery apps take 30% commission, customers cannot see ambience or specialties before visiting.',
+  restaurants: 'Pain points: no online menu, no table reservation system, food delivery apps take 30% commission, customers cannot see ambience or specialties before visiting.',
+  cafe:        'Pain points: no menu online, competitors have Instagram menus and pre-order systems, event bookings happen through scattered WhatsApp messages.',
+  cafes:       'Pain points: no menu online, competitors have Instagram menus and pre-order systems, event bookings happen through scattered WhatsApp messages.',
+  bakery:      'Pain points: no online order system for cakes and custom orders, customers cannot see catalogue, order tracking done manually over WhatsApp.',
+  hotel:       'Pain points: no direct booking system (OTAs take 15-20% commission), no gallery showing rooms, amenities not clearly listed, no direct WhatsApp booking.',
+  hotels:      'Pain points: no direct booking system (OTAs take 15-20% commission), no gallery showing rooms, amenities not clearly listed, no direct WhatsApp booking.',
+
+  // Fitness & wellness
+  gym:         'Pain points: no online membership inquiry or trial class booking, class schedule not visible, competitors have apps for check-ins and progress tracking.',
+  gyms:        'Pain points: no online membership inquiry or trial class booking, class schedule not visible, competitors have apps for check-ins and progress tracking.',
+  yoga:        'Pain points: no online class schedule or booking, students contact via WhatsApp for every session, no way to sell recorded sessions or memberships online.',
+  salon:       'Pain points: appointments only via calls/WhatsApp causing no-shows, no service menu with prices visible online, customers cannot see stylist portfolios.',
+  salons:      'Pain points: appointments only via calls/WhatsApp causing no-shows, no service menu with prices visible online, customers cannot see stylist portfolios.',
+  spa:         'Pain points: no online booking for specific treatments, pricing not transparent, customers book competitors who have cleaner online presence.',
+  beauty:      'Pain points: no online booking, no service catalogue with prices, before/after results not showcased, customers search "near me" and find competitors first.',
+
+  // Education
+  school:      'Pain points: admissions process only via phone or in-person visits, no fee structure online, parents cannot see curriculum or faculty online.',
+  college:     'Pain points: course details not accessible online, admissions information scattered, prospective students cannot compare or apply digitally.',
+  coaching:    'Pain points: no online enrollment, course schedule and fees not visible, students research options online and choose centers with better web presence.',
+
+  // Professional services
+  lawyer:      'Pain points: no case type specialisation listed online, clients cannot assess credibility, no consultation booking system, referrals are the only source.',
+  ca:          'Pain points: services and fees not listed, clients need to call for basic information, no client portal for document sharing, trust difficult to establish online.',
+  accountant:  'Pain points: services and fees not listed, clients need to call for basic information, no client portal for document sharing, trust difficult to establish online.',
+  travel:      'Pain points: packages not displayed online, customers book with competitors who have clear itineraries and pricing, no enquiry form.',
+};
+
+function getNicheContext(niche) {
+  const key = niche.toLowerCase().trim();
+  // Direct match
+  if (NICHE_CONTEXT[key]) return NICHE_CONTEXT[key];
+  // Partial match — find first key that the niche contains or vice versa
+  for (const [k, v] of Object.entries(NICHE_CONTEXT)) {
+    if (key.includes(k) || k.includes(key)) return v;
+  }
+  // Generic fallback
+  return `Pain points: no website presence, customers search online and find competitors, no way to contact or book services digitally, missing trust signals for new customers.`;
+}
+
+// ─── LANGUAGE INSTRUCTIONS ────────────────────────────────────────────────────
+// Appended to the prompt based on user's language selection.
+// Hinglish converts best for tier 2/3 Indian cities — proven by Gopal's own outreach.
+const LANG_INSTRUCTIONS = {
+  english:  'Write ALL pitches in clear professional English.',
+  hinglish: 'Write ALL pitches in natural Hinglish (Hindi + English mix). Like how educated young Indians actually text — not formal, not pure Hindi. Example tone: "Aapki clinic 700+ reviews ke saath top hai, but online booking nahi hai — patients raat ko search karte hain aur competitor ke paas chale jaate hain."',
+  hindi:    'Write ALL pitches in pure Hindi (Devanagari script). Professional but warm tone, as if speaking to a business owner in their local language.',
+};
+
+// ─── GOOGLE MAPS DISCOVERY ───────────────────────────────────────────────────
+async function searchGoogleMaps(niche, city, count, minRating = 4.0, minReviews = 50) {
+  if (!MAPS_KEY) throw new Error('GOOGLE_MAPS_KEY not set in .env');
+  console.log(`[Maps] ${niche} in ${city} | filters: ≥${minRating} rating, ≥${minReviews} reviews`);
+
+  let allPlaces = [], pageToken = null, page = 0;
+
+  while (page < 3) {
+    const params = new URLSearchParams({
+      query: `${niche} in ${city} India`,
+      key: MAPS_KEY,
+      ...(pageToken ? { pagetoken: pageToken } : {})
+    });
+    if (pageToken) await new Promise(r => setTimeout(r, 2000));
+
+    const searchRes  = await fetch(`https://maps.googleapis.com/maps/api/place/textsearch/json?${params}`);
+    const searchData = await searchRes.json();
+
+    if (searchData.status === 'REQUEST_DENIED')
+      throw new Error(`Google Maps denied: ${searchData.error_message || 'check API key'}`);
+    if (searchData.status === 'ZERO_RESULTS') break;
+
+    allPlaces.push(...(searchData.results || []));
+    pageToken = searchData.next_page_token || null;
+    page++;
+    if (!pageToken) break;
+  }
+
+  console.log(`[Maps] Raw: ${allPlaces.length}`);
+
+  // Apply UI-controlled thresholds — not hardcoded
+  const qualified = allPlaces.filter(p =>
+    (p.rating || 0) >= minRating && (p.user_ratings_total || 0) >= minReviews
+  );
+  console.log(`[Maps] Qualified (≥${minRating}, ≥${minReviews} reviews): ${qualified.length}`);
+
+  const unseen = qualified.filter(p => !seenLeads.has(p.place_id));
+  console.log(`[Maps] Unseen: ${unseen.length}`);
+
+  if (!unseen.length) throw new Error(
+    `All qualified ${niche} in ${city} already seen. Hit "Reset seen leads" to start over.`
+  );
+
+  if (unseen.length < count)
+    console.log(`[Maps] Only ${unseen.length} available (requested ${count}) — returning all`);
+
+  // Fisher-Yates shuffle for variety
+  for (let i = unseen.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [unseen[i], unseen[j]] = [unseen[j], unseen[i]];
+  }
+
+  const selected = unseen.slice(0, count);
+
+  // Place Details — phone + website per business
+  const results = await Promise.allSettled(selected.map(async place => {
+    try {
+      const dp = new URLSearchParams({
+        place_id: place.place_id,
+        fields: 'name,formatted_phone_number,website,formatted_address',
+        key: MAPS_KEY
+      });
+      const dr = await fetch(`https://maps.googleapis.com/maps/api/place/details/json?${dp}`);
+      const dd = await dr.json();
+      const d  = dd.result || {};
+      return {
+        id:            `${Date.now()}-${Math.random().toString(36).slice(2,7)}`,
+        placeId:       place.place_id,
+        name:          d.name || place.name,
+        address:       d.formatted_address || place.formatted_address || city,
+        phone:         d.formatted_phone_number || null,
+        website:       d.website || null,
+        rating:        place.rating || null,
+        reviewCount:   place.user_ratings_total || 0,
+        type:          (place.types || [niche])[0].replace(/_/g, ' '),
+        googleMapsUrl: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(d.name || place.name)}&query_place_id=${place.place_id}`
+      };
+    } catch {
+      return {
+        id:            `${Date.now()}-${Math.random().toString(36).slice(2,7)}`,
+        placeId:       place.place_id,
+        name:          place.name,
+        address:       place.formatted_address || city,
+        phone:         null, website: null,
+        rating:        place.rating || null,
+        reviewCount:   place.user_ratings_total || 0,
+        type:          niche,
+        googleMapsUrl: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(place.name)}&query_place_id=${place.place_id}`
+      };
+    }
+  }));
+
+  const detailed = results
+    .filter((r,i) => { if (r.status==='rejected') { console.warn(`[Maps] Details failed ${i}`); return false; } return true; })
+    .map(r => r.value)
+    .filter(b => {
+      // Hard filter: no phone = no way to contact = useless lead
+      // Mark as seen so they don't clog future searches either
+      if (!b.phone) {
+        seenLeads.add(b.placeId);
+        console.log(`[Maps] Skipped (no phone): ${b.name}`);
+        return false;
+      }
+      return true;
+    });
+
+  selected.forEach(p => seenLeads.add(p.place_id));
+  saveSeen(seenLeads);
+  console.log(`[Maps] Returning ${detailed.length} contactable leads | Total seen: ${seenLeads.size}`);
+  return detailed;
+}
+
+// ─── WEBSITE QUALITY CHECKER ─────────────────────────────────────────────────
+// For leads that have a website, fetch it and check 4 criteria:
+//   1. Mobile responsive  — has <meta name="viewport"> tag
+//   2. Booking system     — contains booking/appointment/schedule keywords
+//   3. WhatsApp presence  — has wa.me link or whatsapp keyword
+//   4. Site freshness     — copyright year in footer (old year = stale site)
+//
+// WHY: "has website" and "has good website" are completely different pitch angles.
+// No website → "I'll build you one" (₹15-25K)
+// Bad website → "I'll fix what's hurting you" (₹20-40K, easier sell)
+// Good website → skip (not worth pitching)
+//
+// Runs in parallel for all leads with websites — adds ~2-3s to search time
+// Times out after 6s per site so slow sites don't block the whole pipeline
+
+async function checkWebsiteQuality(url) {
+  if (!url) return null;
+
+  try {
+    const controller = new AbortController();
+    const timeout    = setTimeout(() => controller.abort(), 6000);
+
+    const res = await fetch(url, {
+      signal:  controller.signal,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; lead-agent/1.0)' },
+      redirect: 'follow',
+    });
+    clearTimeout(timeout);
+
+    if (!res.ok) return { error: `HTTP ${res.status}`, url };
+
+    const html = await res.text();
+    const lower = html.toLowerCase();
+
+    // 1. Mobile responsive — viewport meta tag present
+    const isMobile = /<meta[^>]*name=["']viewport["'][^>]*>/i.test(html);
+
+    // 2. Booking/appointment system keywords
+    const bookingKeywords = ['book appointment', 'book now', 'schedule', 'appointment', 'booking', 'reserve', 'calendly', 'practo', 'docprime'];
+    const hasBooking = bookingKeywords.some(k => lower.includes(k));
+
+    // 3. WhatsApp integration
+    const hasWhatsApp = lower.includes('wa.me') || lower.includes('whatsapp') || lower.includes('whats app');
+
+    // 4. Site freshness — look for copyright year in footer
+    const yearMatch = lower.match(/copyright[^0-9]*([0-9]{4})|©\s*([0-9]{4})/);
+    const copyrightYear = yearMatch ? parseInt(yearMatch[1] || yearMatch[2]) : null;
+    const currentYear   = new Date().getFullYear();
+    const isStale       = copyrightYear && copyrightYear < currentYear - 3;
+
+    // Overall verdict
+    let verdict, pitchAngle;
+    const issueCount = (!isMobile ? 1 : 0) + (!hasBooking ? 1 : 0) + (!hasWhatsApp ? 1 : 0) + (isStale ? 1 : 0);
+
+    if (issueCount >= 3) {
+      verdict    = 'poor';
+      pitchAngle = 'complete redesign needed';
+    } else if (issueCount >= 1) {
+      verdict    = 'outdated';
+      pitchAngle = 'upgrade existing site';
+    } else {
+      verdict    = 'decent';
+      pitchAngle = 'minor improvements only';
+    }
+
+    return { url, isMobile, hasBooking, hasWhatsApp, copyrightYear, isStale, verdict, pitchAngle, issueCount };
+
+  } catch (err) {
+    // Timeout or fetch error — treat as unverified, not as "good"
+    return { url, error: err.name === 'AbortError' ? 'timeout' : err.message, verdict: 'unverified', pitchAngle: 'could not check site' };
+  }
+}
+
+// ─── CLAUDE ANALYSIS ─────────────────────────────────────────────────────────
+// Now receives niche + language — prompt adapts dynamically
+async function analyseLeads(businesses, service, niche, language = 'english') {
+  console.log(`[Claude] Scoring | niche: ${niche} | language: ${language}`);
+
+  const nicheContext   = getNicheContext(niche);
+  const langInstruction = LANG_INSTRUCTIONS[language] || LANG_INSTRUCTIONS.english;
+
+  // Dynamic system prompt — niche-specific pain points + language instruction
+  const systemPrompt = `You are a lead scoring agent for a freelance web developer.
+The developer offers: modern website redesign, workflow automation, booking systems, WhatsApp integration.
+Target budget: Rs 15,000 to Rs 60,000.
+
+NICHE CONTEXT for "${niche}":
+${nicheContext}
+
+Score each business 1-10:
+- 8-10: no website OR website verdict is "poor" = perfect target, high conversion chance
+- 5-7:  website verdict is "outdated" = upgrade opportunity, good target
+- 1-4:  website verdict is "decent" with no major issues = skip for now
+- If website could not be checked, score based on rating/review profile
+
+Pitch rules:
+- 2-3 sentences MAX
+- Reference their specific rating OR review count — makes it personal
+- Reference a SPECIFIC pain point from the niche context above
+- One pain point → one clear benefit
+
+LANGUAGE: ${langInstruction}
+
+YOUR ENTIRE RESPONSE = ONE RAW JSON OBJECT. Start with { end with }. No markdown. No preamble.
+
+{
+  "leads": [
+    {
+      "name": "string",
+      "website": "url or null",
+      "phone": "string or null",
+      "address": "string",
+      "rating": 4.2,
+      "reviewCount": 143,
+      "score": 8,
+      "scoreReason": "one sentence",
+      "painPoints": "specific issues for this niche",
+      "pitch": "2-3 sentence pitch in requested language",
+      "type": "clinic/cafe/gym/etc"
+    }
+  ],
+  "summary": "one sentence overall finding"
+}`;
+
+  const businessData = businesses.map((b, i) => {
+    let websiteInfo = 'none found — build from scratch opportunity';
+    if (b.website) {
+      if (b.websiteQuality) {
+        const wq = b.websiteQuality;
+        if (wq.error) {
+          websiteInfo = `${b.website} (could not check — treat as unverified)`;
+        } else {
+          const issues = [];
+          if (!wq.isMobile)    issues.push('not mobile responsive');
+          if (!wq.hasBooking)  issues.push('no booking system');
+          if (!wq.hasWhatsApp) issues.push('no WhatsApp');
+          if (wq.isStale)      issues.push(`outdated (copyright ${wq.copyrightYear})`);
+          websiteInfo = `${b.website} | verdict: ${wq.verdict} | issues: ${issues.length > 0 ? issues.join(', ') : 'none found'} | pitch angle: ${wq.pitchAngle}`;
+        }
+      } else {
+        websiteInfo = b.website;
+      }
+    }
+    return `${i+1}. ${b.name}` +
+    `\n   Type: ${b.type}` +
+    `\n   Address: ${b.address}` +
+    `\n   Phone: ${b.phone}` +
+    `\n   Website: ${websiteInfo}` +
+    `\n   Rating: ${b.rating || 'n/a'} (${b.reviewCount || 0} reviews)`;
+  }).join('\n\n');
+
+  const res = await client.messages.create({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 6000,
+    system: systemPrompt,
+    messages: [
+      { role: 'user', content: `Businesses:\n\n${businessData}\n\nService: ${service}\n\nReturn only JSON.` },
+      { role: 'assistant', content: '{' }
+    ]
+  });
+
+  const rawJSON = '{' + res.content.filter(b=>b.type==='text').map(b=>b.text).join('').trim();
+  console.log('[Claude] Response (first 300):\n', rawJSON.slice(0,300));
+
+  let parsed;
+  try { parsed = JSON.parse(rawJSON); } catch {}
+  if (!parsed) { try { parsed = JSON.parse(rawJSON.replace(/```json\s*/gi,'').replace(/```\s*/g,'').trim()); } catch {} }
+  if (!parsed) { const m = rawJSON.match(/\{[\s\S]*\}/); if (m) { try { parsed = JSON.parse(m[0]); } catch {} } }
+  return parsed;
+}
+
+// ─── ROUTES ───────────────────────────────────────────────────────────────────
+
+app.post('/api/leads', async (req, res) => {
+  const {
+    niche, city, service,
+    count      = 5,
+    minRating  = 4.0,
+    minReviews = 50,
+    language   = 'english'
+  } = req.body;
+
+  if (!niche || !city || !service)
+    return res.status(400).json({ error: 'niche, city, and service are required' });
+
+  try {
+    const businesses = await searchGoogleMaps(
+      niche, city, parseInt(count),
+      parseFloat(minRating), parseInt(minReviews)
+    );
+
+    // Run website quality check in parallel for all leads that have a URL
+    // Promise.allSettled — one slow/broken site doesn't block the others
+    console.log(`[Website] Checking ${businesses.filter(b=>b.website).length} sites...`);
+    const siteChecks = await Promise.allSettled(
+      businesses.map(b => b.website ? checkWebsiteQuality(b.website) : Promise.resolve(null))
+    );
+    businesses.forEach((b, i) => {
+      const result = siteChecks[i];
+      b.websiteQuality = (result.status === 'fulfilled') ? result.value : null;
+      if (b.websiteQuality) {
+        console.log(`[Website] ${b.name}: ${b.websiteQuality.verdict || b.websiteQuality.error}`);
+      }
+    });
+
+    const parsed = await analyseLeads(businesses, service, niche, language);
+    if (!parsed?.leads?.length)
+      return res.status(500).json({ error: 'Could not score leads. Check terminal.' });
+
+    // Merge by name — preserves correct Maps URLs regardless of Claude's output order
+    const bizByName = {};
+    businesses.forEach(b => { bizByName[b.name.toLowerCase().trim()] = b; });
+
+    parsed.leads = parsed.leads.map((lead, i) => {
+      const key      = (lead.name || '').toLowerCase().trim();
+      const src      = bizByName[key] || businesses[i] || {};
+      return {
+        ...src, ...lead,
+        googleMapsUrl:  src.googleMapsUrl || lead.googleMapsUrl,
+        id:             src.id || `${Date.now()}-${i}`,
+        language,
+        websiteQuality: src.websiteQuality || null,  // pass quality data to frontend
+      };
+    });
+
+    console.log(`[Done] ${parsed.leads.length} leads | lang: ${language}\n`);
+    res.json(parsed);
+  } catch (err) {
+    console.error('[Error]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/seen/count', (req, res) => res.json({ count: seenLeads.size }));
+
+app.delete('/api/seen', (req, res) => {
+  seenLeads = new Set();
+  saveSeen(seenLeads);
+  console.log('[Seen] Reset');
+  res.json({ ok: true });
+});
+
+app.get('/api/saved', (req, res) => res.json({ saved: [...shortlist.values()] }));
+
+app.post('/api/saved', async (req, res) => {
+  const lead = req.body;
+  if (!lead?.id) return res.status(400).json({ error: 'Lead must have an id' });
+  shortlist.set(lead.id, { ...lead, savedAt: new Date().toISOString(), status: 'new' });
+  saveShortlist(shortlist);
+  try { await appendLeadToExcel(lead); console.log(`[Excel] Appended: ${lead.name}`); }
+  catch (err) { console.error('[Excel] Failed:', err.message); }
+  res.json({ ok: true, saved: shortlist.size });
+});
+
+app.patch('/api/saved/:id', (req, res) => {
+  const lead = shortlist.get(req.params.id);
+  if (!lead) return res.status(404).json({ error: 'Lead not found' });
+  shortlist.set(req.params.id, { ...lead, ...req.body });
+  saveShortlist(shortlist);
+  res.json({ ok: true });
+});
+
+app.delete('/api/saved/:id', (req, res) => {
+  shortlist.delete(req.params.id);
+  saveShortlist(shortlist);
+  res.json({ ok: true });
+});
+
+// Catch-all: serve React app for any non-API route
+// This makes React Router work when you refresh on /pipeline or /dashboard
+app.get('*', (req, res) => {
+  const indexPath = join(__dirname, 'client', 'dist', 'index.html')
+  if (existsSync(indexPath)) {
+    res.sendFile(indexPath)
+  } else {
+    res.status(404).json({ error: 'React build not found. Run: cd client && npm run build' })
+  }
+})
+
+const PORT = process.env.PORT || 3003;
+app.listen(PORT, () => {
+  console.log(`\nLead agent v7 → http://localhost:${PORT}`);
+  console.log(`Google Maps:   ${MAPS_KEY ? '✓' : '✗ GOOGLE_MAPS_KEY missing'}`);
+  console.log(`Anthropic:     ${process.env.ANTHROPIC_API_KEY ? '✓' : '✗ missing'}`);
+  console.log(`Excel:         ${ExcelJS ? '✓' : '✗ run npm install exceljs'}`);
+  console.log(`Shortlist:     ${shortlist.size} saved leads`);
+  console.log(`Seen leads:    ${seenLeads.size} businesses\n`);
+});
