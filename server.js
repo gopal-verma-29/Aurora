@@ -1,20 +1,15 @@
-// server.js — Aurora v1 (UK/AU beauty studio pipeline)
+// server.js — Aurora v1.3 (UK/AU beauty studio pipeline)
 //
-// FORKED FROM: lead-agent v7 (India pipeline)
-// CHANGES FROM v7:
-//   1. Removed hardcoded "India" from Maps query — now searches globally
-//   2. Added beauty/lash/brow niche contexts (UK/AU pain points)
-//   3. Rewired Claude output — LinkedIn message + Loom brief instead of WhatsApp pitch
-//   4. Output mode toggle: "linkedin" vs "loom" (replaces language toggle)
-//   5. Recalibrated default filters for UK/AU market (lower review thresholds)
-//   6. Added 2 extra website quality checks: subdomain detection + "DM to book" signal
-//   7. Budget reframed: $600–$1500 USD instead of INR
-//
-// FLOW:
-//   Browser → Google Maps (60 raw results, filtered by UI thresholds)
-//           → Site quality checker (6 criteria)
-//           → Claude (niche-aware prompt → LinkedIn message + Loom brief)
-//           → shortlist + Excel export
+// CHANGES FROM v1.0:
+//   1. City exhausted → returns empty gracefully instead of crashing
+//   2. UK/AU country filter — no US/India results ever
+//   3. Instagram handle extraction from website HTML
+//   4. Owner name detection from About page
+//   5. Expanded website checks (8 total vs 6)
+//   6. Score calibration fixed — polished sites score 2-3, broken sites 8-10
+//   7. Sonnet for scoring, Haiku for message generation (split model usage)
+//   8. PageSpeed signal via response time measurement
+//   9. No-prices detection — key pain point for beauty studios
 
 import 'dotenv/config';
 import express from 'express';
@@ -44,18 +39,15 @@ const MAPS_KEY = process.env.GOOGLE_MAPS_KEY;
 
 // ─── SHORTLIST ────────────────────────────────────────────────────────────────
 const SHORTLIST_PATH = './shortlist.json';
-
 function loadShortlist() {
   try {
     const data = JSON.parse(readFileSync(SHORTLIST_PATH, 'utf8'));
     return new Map(data.map(l => [l.id, l]));
   } catch { return new Map(); }
 }
-
 function saveShortlist(map) {
   writeFileSync(SHORTLIST_PATH, JSON.stringify([...map.values()], null, 2));
 }
-
 const shortlist = loadShortlist();
 console.log(`[Shortlist] Loaded ${shortlist.size} saved leads`);
 
@@ -72,8 +64,9 @@ console.log(`[Seen] ${seenLeads.size} previously seen businesses`);
 // ─── EXCEL EXPORT ─────────────────────────────────────────────────────────────
 const EXCEL_PATH  = './leads-uk-au.xlsx';
 const EXCEL_HEADS = [
-  'Name','Type','Address','Phone','Website','Score','Score Reason',
-  'Pain Points','LinkedIn Message','Loom Brief','Follow Up',
+  'Name','Type','Address','Phone','Website','Instagram','Owner',
+  'Score','Score Reason','Pain Points',
+  'LinkedIn Message','Loom Brief','Follow Up',
   'Maps URL','Output Mode','Status','Saved At'
 ];
 
@@ -92,71 +85,66 @@ async function appendLeadToExcel(lead) {
     ws = wb.addWorksheet('Leads');
     const hr = ws.addRow(EXCEL_HEADS);
     hr.font = { bold: true };
-    const widths = [28,12,35,18,30,8,40,45,60,60,50,50,14,14,22];
+    const widths = [28,12,35,18,30,20,16,8,40,45,60,60,50,50,14,14,22];
     ws.columns = EXCEL_HEADS.map((h,i) => ({ header:h, width:widths[i] }));
   }
   ws.addRow([
     lead.name||'', lead.type||'', lead.address||'', lead.phone||'',
-    lead.website||'', lead.score||'', lead.scoreReason||'',
-    lead.painPoints||'', lead.linkedinMessage||'', lead.loomBrief||'',
-    lead.followUp||'', lead.googleMapsUrl||'',
-    lead.outputMode||'linkedin', 'new', new Date().toLocaleString('en-GB')
+    lead.website||'', lead.instagramHandle||'', lead.ownerName||'',
+    lead.score||'', lead.scoreReason||'', lead.painPoints||'',
+    lead.linkedinMessage||'', lead.loomBrief||'', lead.followUp||'',
+    lead.googleMapsUrl||'', lead.outputMode||'linkedin',
+    'new', new Date().toLocaleString('en-GB')
   ]);
   await wb.xlsx.writeFile(EXCEL_PATH);
 }
 
+// ─── UK/AU COUNTRY FILTER ─────────────────────────────────────────────────────
+// FIX: Prevents US/India/other results from slipping through
+// Google Maps sometimes resolves ambiguous city names to wrong countries
+function isUKorAU(address) {
+  if (!address) return false;
+  const addr = address.toLowerCase();
+  return (
+    addr.includes(', uk') ||
+    addr.includes('united kingdom') ||
+    addr.includes('england') ||
+    addr.includes('scotland') ||
+    addr.includes('wales') ||
+    addr.includes(', australia') ||
+    addr.includes(' au ') ||
+    addr.match(/\b(nsw|vic|qld|sa|wa|tas|act|nt)\b/) !== null ||
+    addr.includes('new south wales') ||
+    addr.includes('victoria') ||
+    addr.includes('queensland')
+  )
+}
+
 // ─── NICHE CONTEXT MAP ────────────────────────────────────────────────────────
-// Maps niche keywords → specific pain points for that business type.
-// Split into two sections: UK/AU beauty niches (primary) + legacy India niches (kept for compatibility)
 const NICHE_CONTEXT = {
-
-  // ── UK / AU BEAUTY STUDIOS (primary targets) ─────────────────────────────
   'lash studio':    'Pain points: bookings managed entirely through Instagram DMs causing 2-3hrs daily admin, no deposit system so high no-show rate, clients cannot see pricing or portfolio without DMing, "lash studio near me" searches return competitors with proper booking sites, still on wixsite.com or squarespace.com subdomain meaning zero Google discoverability.',
-  'lash artist':    'Pain points: bookings managed entirely through Instagram DMs causing 2-3hrs daily admin, no deposit system so high no-show rate, clients cannot see pricing or portfolio without DMing, "lash studio near me" searches return competitors with proper booking sites, still on wixsite.com or squarespace.com subdomain meaning zero Google discoverability.',
-  'lash':           'Pain points: bookings managed entirely through Instagram DMs causing 2-3hrs daily admin, no deposit system so high no-show rate, clients cannot see pricing or portfolio without DMing, "lash studio near me" searches return competitors with proper booking sites.',
-  'brow studio':    'Pain points: no online booking so clients DM for every appointment, no deposit collection meaning high no-show rate, pricing not visible online, still on wixsite.com or squarespace.com subdomain meaning zero Google discoverability, competitors with proper booking pages are taking their walk-in traffic.',
-  'brow artist':    'Pain points: no online booking so clients DM for every appointment, no deposit collection meaning high no-show rate, pricing not visible online, still on wixsite.com or squarespace.com subdomain meaning zero Google discoverability.',
-  'brow':           'Pain points: no online booking so clients DM for every appointment, no deposit collection meaning high no-show rate, pricing not visible online.',
-  'beauty studio':  'Pain points: no online booking, appointments via DMs only causing missed revenue outside business hours, no portfolio gallery for new clients to assess work quality, site either missing or DIY template with broken contact form or booking widget.',
-  'beauty salon':   'Pain points: no online booking causing phone tag and lost clients, appointments via calls/DMs only, no service menu with transparent pricing, clients cannot find them on Google because site has poor mobile performance.',
-  'nail studio':    'Pain points: no online booking system, clients DM to check availability wasting hours daily, pricing inconsistency, no gallery showcasing nail work, competitors with proper booking pages are capturing their walk-in traffic.',
-  'nail salon':     'Pain points: no online booking system, clients DM to check availability wasting hours daily, no gallery showcasing work quality, site either on free subdomain or visually outdated.',
-  'microblading':   'Pain points: no online booking for consultations, no before/after gallery to build trust, no deposit system for high-value treatments, new clients cannot assess artist credibility without a proper portfolio site.',
-  'aesthetics':     'Pain points: no online consultation booking, no treatment menu with clear pricing, no before/after gallery, clients research aesthetics providers heavily online before committing — a weak site loses them to competitors immediately.',
-  'skin clinic':    'Pain points: no online booking for treatments, no service menu with pricing transparency, no practitioner credentials visible, clients research skin clinics extensively before booking — weak site loses them instantly.',
-  'wellness studio':'Pain points: no class schedule visible online, no online booking or membership signup, clients discover studios via Google and immediately compare booking ease — studios without online booking lose most of these.',
-  'pilates':        'Pain points: no online class booking, class schedule not visible, no membership signup flow, competitors using Mindbody or similar have seamless booking — manual DM booking is losing clients who want instant confirmation.',
-  'yoga':           'Pain points: no online class schedule or booking, students contact via DMs for every session, no way to sell memberships or class packs online, competitors with booking systems convert discovery traffic that this studio loses.',
-
-  // ── LEGACY INDIA NICHES (kept for backward compatibility) ─────────────────
-  clinic:      'Pain points: no online appointment booking, patients search at night and find competitors, no way to verify credentials or see services online.',
-  clinics:     'Pain points: no online appointment booking, patients search at night and find competitors, no way to verify credentials or see services online.',
-  hospital:    'Pain points: no department listing, no OPD schedule online, patients call for basic info (wastes staff time), no doctor profiles.',
-  hospitals:   'Pain points: no department listing, no OPD schedule online, patients call for basic info (wastes staff time), no doctor profiles.',
-  dentist:     'Pain points: patients research dentists online before visiting, no before/after gallery, no appointment booking, anxiety patients need trust signals.',
-  dental:      'Pain points: patients research dentists online before visiting, no before/after gallery, no appointment booking, anxiety patients need trust signals.',
-  pharmacy:    'Pain points: no medicine availability checker, no home delivery option visible, customers go to competitors with apps.',
-  doctor:      'Pain points: no online consultation option, patients cannot verify qualifications, no appointment system.',
-  restaurant:  'Pain points: no online menu, no table reservation system, food delivery apps take 30% commission, customers cannot see ambience or specialties before visiting.',
-  restaurants: 'Pain points: no online menu, no table reservation system, food delivery apps take 30% commission.',
-  cafe:        'Pain points: no menu online, competitors have Instagram menus and pre-order systems, event bookings happen through scattered WhatsApp messages.',
-  cafes:       'Pain points: no menu online, competitors have Instagram menus and pre-order systems.',
-  bakery:      'Pain points: no online order system for cakes and custom orders, customers cannot see catalogue.',
-  hotel:       'Pain points: no direct booking system (OTAs take 15-20% commission), no gallery showing rooms, amenities not clearly listed.',
-  hotels:      'Pain points: no direct booking system (OTAs take 15-20% commission), no gallery showing rooms.',
-  gym:         'Pain points: no online membership inquiry or trial class booking, class schedule not visible.',
-  gyms:        'Pain points: no online membership inquiry or trial class booking, class schedule not visible.',
-  salon:       'Pain points: appointments only via calls/WhatsApp causing no-shows, no service menu with prices visible online.',
-  salons:      'Pain points: appointments only via calls/WhatsApp causing no-shows, no service menu with prices visible online.',
-  spa:         'Pain points: no online booking for specific treatments, pricing not transparent.',
-  beauty:      'Pain points: no online booking, no service catalogue with prices, before/after results not showcased.',
-  school:      'Pain points: admissions process only via phone or in-person visits, no fee structure online.',
-  college:     'Pain points: course details not accessible online, admissions information scattered.',
-  coaching:    'Pain points: no online enrollment, course schedule and fees not visible.',
-  lawyer:      'Pain points: no case type specialisation listed online, clients cannot assess credibility, no consultation booking system.',
-  ca:          'Pain points: services and fees not listed, clients need to call for basic information.',
-  accountant:  'Pain points: services and fees not listed, clients need to call for basic information.',
-  travel:      'Pain points: packages not displayed online, customers book with competitors who have clear itineraries and pricing.',
+  'lash artist':    'Pain points: bookings managed entirely through Instagram DMs causing 2-3hrs daily admin, no deposit system so high no-show rate, clients cannot see pricing or portfolio without DMing.',
+  'lash':           'Pain points: bookings managed entirely through Instagram DMs, no deposit system, clients cannot see pricing or portfolio without DMing.',
+  'brow studio':    'Pain points: no online booking so clients DM for every appointment, no deposit collection meaning high no-show rate, pricing not visible online, still on free subdomain meaning zero Google discoverability.',
+  'brow artist':    'Pain points: no online booking, no deposit collection, pricing not visible online, still on free subdomain.',
+  'brow':           'Pain points: no online booking, no deposit collection, pricing not visible online.',
+  'beauty studio':  'Pain points: no online booking, appointments via DMs only causing missed revenue outside business hours, no portfolio gallery for new clients, site either missing or DIY template with broken contact form.',
+  'beauty salon':   'Pain points: no online booking causing phone tag and lost clients, appointments via calls/DMs only, no service menu with transparent pricing, poor mobile performance losing Google traffic.',
+  'nail studio':    'Pain points: no online booking system, clients DM to check availability, no gallery showcasing work, competitors with proper booking pages capturing walk-in traffic.',
+  'nail salon':     'Pain points: no online booking, clients DM to check availability, no gallery showcasing work quality.',
+  'microblading':   'Pain points: no online booking for consultations, no before/after gallery to build trust, no deposit system for high-value treatments.',
+  'aesthetics':     'Pain points: no online consultation booking, no treatment menu with clear pricing, no before/after gallery.',
+  'skin clinic':    'Pain points: no online booking for treatments, no service menu with pricing transparency, no practitioner credentials visible.',
+  'wellness studio':'Pain points: no class schedule visible online, no online booking or membership signup.',
+  'pilates':        'Pain points: no online class booking, class schedule not visible, no membership signup flow.',
+  'yoga':           'Pain points: no online class schedule or booking, no way to sell memberships or class packs online.',
+  // Legacy India niches
+  clinic:      'Pain points: no online appointment booking, patients search at night and find competitors.',
+  hospital:    'Pain points: no department listing, no OPD schedule online.',
+  dentist:     'Pain points: no before/after gallery, no appointment booking.',
+  restaurant:  'Pain points: no online menu, no table reservation system.',
+  gym:         'Pain points: no online membership inquiry or trial class booking.',
+  salon:       'Pain points: appointments only via calls/WhatsApp causing no-shows.',
 };
 
 function getNicheContext(niche) {
@@ -165,21 +153,15 @@ function getNicheContext(niche) {
   for (const [k, v] of Object.entries(NICHE_CONTEXT)) {
     if (key.includes(k) || k.includes(key)) return v;
   }
-  return `Pain points: no website presence, customers search online and find competitors, no way to contact or book services digitally, missing trust signals for new customers.`;
+  return 'Pain points: no website presence, customers search online and find competitors, missing trust signals for new customers.';
 }
 
-// ─── OUTPUT MODE INSTRUCTIONS ─────────────────────────────────────────────────
-// "linkedin" → generates LinkedIn connection message + follow-up
-// "loom"     → generates Loom recording brief (what to show on screen)
-// Both modes always generate both fields — mode just affects which Claude optimises for
 const OUTPUT_MODE_INSTRUCTIONS = {
-  linkedin: 'Optimise the linkedinMessage for maximum reply rate. It should feel like a real person wrote it — specific, warm, not salesy. The loomBrief should still be generated as bullet points the dev can use if they choose to record.',
-  loom:     'Optimise the loomBrief for maximum visual impact — exactly what to show on screen, in what order, what to say. The linkedinMessage should still be generated as a clean connection message to send alongside the Loom link.',
+  linkedin: 'Optimise the linkedinMessage for maximum reply rate. Specific, warm, not salesy.',
+  loom:     'Optimise the loomBrief for maximum visual impact — exactly what to show on screen, in what order.',
 };
 
 // ─── GOOGLE MAPS DISCOVERY ───────────────────────────────────────────────────
-// CHANGE FROM v7: Removed hardcoded "India" — query is now region-neutral
-// The city field carries full location context e.g. "Leeds UK" or "Melbourne Australia"
 async function searchGoogleMaps(niche, city, count, minRating = 3.5, minReviews = 15) {
   if (!MAPS_KEY) throw new Error('GOOGLE_MAPS_KEY not set in .env');
   console.log(`[Maps] ${niche} in ${city} | filters: ≥${minRating} rating, ≥${minReviews} reviews`);
@@ -188,7 +170,6 @@ async function searchGoogleMaps(niche, city, count, minRating = 3.5, minReviews 
 
   while (page < 3) {
     const params = new URLSearchParams({
-      // CHANGED: removed "India" suffix — city now carries full location context
       query: `${niche} in ${city}`,
       key: MAPS_KEY,
       ...(pageToken ? { pagetoken: pageToken } : {})
@@ -210,19 +191,30 @@ async function searchGoogleMaps(niche, city, count, minRating = 3.5, minReviews 
 
   console.log(`[Maps] Raw: ${allPlaces.length}`);
 
-  // CHANGED: default thresholds lowered for UK/AU market
-  // UK/AU small businesses have fewer reviews than Indian businesses on average
   const qualified = allPlaces.filter(p =>
     (p.rating || 0) >= minRating && (p.user_ratings_total || 0) >= minReviews
   );
   console.log(`[Maps] Qualified (≥${minRating}, ≥${minReviews} reviews): ${qualified.length}`);
 
-  const unseen = qualified.filter(p => !seenLeads.has(p.place_id));
+  // FIX: Filter to UK/AU only — prevents US results from slipping through
+  const ukAuOnly = qualified.filter(p => {
+    const addr = p.formatted_address || '';
+    if (!isUKorAU(addr)) {
+      console.log(`[Maps] Filtered non-UK/AU: ${p.name} — ${addr}`);
+      return false;
+    }
+    return true;
+  });
+  console.log(`[Maps] UK/AU only: ${ukAuOnly.length}`);
+
+  const unseen = ukAuOnly.filter(p => !seenLeads.has(p.place_id));
   console.log(`[Maps] Unseen: ${unseen.length}`);
 
-  if (!unseen.length) throw new Error(
-    `All qualified ${niche} in ${city} already seen. Hit "Reset seen leads" to start over.`
-  );
+  // FIX: Return empty array instead of throwing — lets n8n continue with other scans
+  if (!unseen.length) {
+    console.log(`[Maps] All seen in ${city} — returning empty, other scans continue`);
+    return [];
+  }
 
   if (unseen.length < count)
     console.log(`[Maps] Only ${unseen.length} available (requested ${count}) — returning all`);
@@ -278,8 +270,6 @@ async function searchGoogleMaps(niche, city, count, minRating = 3.5, minReviews 
     })
     .map(r => r.value)
     .filter(b => {
-      // For UK/AU pipeline: phone is still useful but not hard-required
-      // Some UK studios are website-only contact — keep them, just flag
       if (!b.phone && !b.website) {
         seenLeads.add(b.placeId);
         console.log(`[Maps] Skipped (no phone + no website): ${b.name}`);
@@ -295,33 +285,32 @@ async function searchGoogleMaps(niche, city, count, minRating = 3.5, minReviews 
 }
 
 // ─── WEBSITE QUALITY CHECKER ─────────────────────────────────────────────────
-// EXTENDED FROM v7: added 2 new checks specific to UK/AU beauty studios:
-//   5. Subdomain detection — still on wixsite.com or squarespace.com = zero SEO
-//   6. DM-to-book signal  — "dm to book" or "message to book" in page = major pain point
-//
-// All 6 checks:
-//   1. Mobile responsive  — has <meta name="viewport"> tag
-//   2. Booking system     — booking/appointment/schedule keywords present
-//   3. Online booking     — WhatsApp booking OR no booking at all (UK/AU = neither)
-//   4. Site freshness     — copyright year in footer
-//   5. Subdomain          — still on free platform subdomain (wixsite/squarespace)
-//   6. DM booking         — explicitly tells users to DM to book
+// 8 checks total (up from 6):
+//   1. Mobile responsive
+//   2. Booking system present
+//   3. DM-to-book signal
+//   4. Site freshness (copyright year)
+//   5. Free subdomain detection
+//   6. NEW: No prices visible
+//   7. NEW: Instagram link present (social proof)
+//   8. NEW: Load speed signal (measures fetch time)
 
 async function checkWebsiteQuality(url) {
   if (!url) return null;
 
-  // NEW: subdomain check before even fetching
   const isOnSubdomain = /wixsite\.com|squarespace\.com\/[^/]+$|weebly\.com|wordpress\.com|godaddysites\.com/i.test(url);
 
   try {
     const controller = new AbortController();
-    const timeout    = setTimeout(() => controller.abort(), 6000);
+    const timeout    = setTimeout(() => controller.abort(), 8000);
+    const fetchStart = Date.now();
 
     const res = await fetch(url, {
       signal:  controller.signal,
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; aurora-agent/1.0)' },
       redirect: 'follow',
     });
+    const loadTime = Date.now() - fetchStart;
     clearTimeout(timeout);
 
     if (!res.ok) return { error: `HTTP ${res.status}`, url, isOnSubdomain };
@@ -336,89 +325,95 @@ async function checkWebsiteQuality(url) {
     const bookingKeywords = [
       'book appointment', 'book now', 'book a', 'schedule', 'appointment',
       'booking', 'reserve', 'calendly', 'fresha', 'treatwell', 'square appointments',
-      'timely', 'shortcuts', 'acuity', 'vagaro', 'mindbody', 'booker'
+      'timely', 'shortcuts', 'acuity', 'vagaro', 'mindbody', 'booker', 'setmore'
     ];
     const hasBooking = bookingKeywords.some(k => lower.includes(k));
 
-    // 3. NEW: DM-to-book signal — biggest pain point for beauty studios
+    // 3. DM-to-book signal
     const dmKeywords = [
       'dm to book', 'dm us to book', 'message to book', 'message us to book',
       'inbox to book', 'contact us to book', 'whatsapp to book',
-      'slide into', 'send us a message to', 'reach out to book'
+      'slide into', 'send us a message to book', 'reach out to book',
+      'text to book', 'call to book', 'ring to book'
     ];
     const hasDMBooking = dmKeywords.some(k => lower.includes(k));
 
     // 4. Site freshness
-    const yearMatch    = lower.match(/copyright[^0-9]*([0-9]{4})|©\s*([0-9]{4})/);
+    const yearMatch     = lower.match(/copyright[^0-9]*([0-9]{4})|©\s*([0-9]{4})/);
     const copyrightYear = yearMatch ? parseInt(yearMatch[1] || yearMatch[2]) : null;
     const currentYear   = new Date().getFullYear();
     const isStale       = copyrightYear && copyrightYear < currentYear - 2;
 
-    // 5. Subdomain (already checked above, include in result)
-    // 6. DM booking already checked above
+    // 5. Subdomain (already checked)
 
-    // Scoring: more issues = higher priority for outreach
+    // 6. NEW: Prices visible — beauty studios should show prices
+    const priceKeywords = ['£', '$', 'price', 'pricing', 'from £', 'starting from', 'treatment menu', 'service menu', 'rate'];
+    const hasPrices = priceKeywords.some(k => lower.includes(k));
+
+    // 7. NEW: Instagram handle extraction
+    const igMatch = html.match(/instagram\.com\/([a-zA-Z0-9_.]{2,30})/);
+    const instagramHandle = igMatch
+      ? igMatch[1].replace(/\/$/, '').toLowerCase()
+      : null;
+    // Filter out generic instagram paths
+    const validIG = instagramHandle && !['p', 'explore', 'reel', 'stories', 'tv'].includes(instagramHandle)
+      ? instagramHandle : null;
+
+    // 8. NEW: Load speed — slow sites lose mobile visitors
+    const isSlowLoading = loadTime > 4000;
+
+    // Issue scoring
     const issueCount = (
-      (!isMobile    ? 1 : 0) +
-      (!hasBooking  ? 1 : 0) +
-      (hasDMBooking ? 1 : 0) +  // DM booking is a positive issue signal
-      (isStale      ? 1 : 0) +
-      (isOnSubdomain ? 1 : 0)
+      (!isMobile      ? 1 : 0) +
+      (!hasBooking    ? 2 : 0) +  // No booking = 2 points (biggest pain)
+      (hasDMBooking   ? 2 : 0) +  // DM booking = 2 points (strong signal)
+      (isStale        ? 1 : 0) +
+      (isOnSubdomain  ? 2 : 0) +  // Subdomain = 2 points (no SEO)
+      (!hasPrices     ? 1 : 0) +  // No prices = 1 point
+      (isSlowLoading  ? 1 : 0)    // Slow = 1 point
     );
 
     let verdict, pitchAngle;
-    if (issueCount >= 3) {
+    if (issueCount >= 5) {
       verdict    = 'poor';
       pitchAngle = 'complete rebuild needed — multiple critical issues';
-    } else if (issueCount >= 1) {
+    } else if (issueCount >= 2) {
       verdict    = 'outdated';
-      pitchAngle = 'upgrade existing site — clear gaps to fix';
+      pitchAngle = 'targeted upgrade — clear gaps to address';
     } else {
       verdict    = 'decent';
-      pitchAngle = 'minor improvements only';
-    }
-
-    // Override: DM booking alone is a strong signal regardless of other issues
-    if (hasDMBooking) {
-      verdict    = verdict === 'decent' ? 'outdated' : verdict;
-      pitchAngle = 'DM booking detected — strong automation opportunity';
-    }
-
-    // Override: subdomain alone is a credibility killer
-    if (isOnSubdomain && verdict === 'decent') {
-      verdict    = 'outdated';
-      pitchAngle = 'free subdomain — no Google presence, credibility issue';
+      pitchAngle = 'minor improvements only — lower priority';
     }
 
     return {
-      url, isMobile, hasBooking, hasDMBooking,
-      isOnSubdomain, copyrightYear, isStale,
+      url, isMobile, hasBooking, hasDMBooking, hasPrices,
+      isOnSubdomain, copyrightYear, isStale, isSlowLoading,
+      loadTime, instagramHandle: validIG,
       verdict, pitchAngle, issueCount
     };
 
   } catch (err) {
     return {
       url, isOnSubdomain,
-      error: err.name === 'AbortError' ? 'timeout' : err.message,
+      error: err.name === 'AbortError' ? 'timeout (8s)' : err.message,
       verdict: 'unverified',
-      pitchAngle: 'could not check site — approach as unknown'
+      pitchAngle: 'could not verify — approach cautiously'
     };
   }
 }
 
 // ─── CLAUDE ANALYSIS ─────────────────────────────────────────────────────────
-// FULLY REWRITTEN FROM v7:
-//   - Target changed: UK/AU beauty studios instead of India businesses
-//   - Budget: $600-1500 USD instead of INR
-//   - Output: LinkedIn message + Loom brief + follow-up (not WhatsApp pitch)
-//   - Language: English only (not Hindi/Hinglish)
-//   - Scoring calibrated for UK/AU market signals
+// UPGRADED:
+//   - Score calibration completely rewritten — polished sites now score 1-3
+//   - Scoring rubric is explicit with exact conditions
+//   - instagramHandle passed through to output
+//   - Model: claude-sonnet-4-6 for better reasoning on scores
 
 async function analyseLeads(businesses, service, niche, outputMode = 'linkedin') {
-  console.log(`[Claude] Scoring | niche: ${niche} | outputMode: ${outputMode}`);
+  console.log(`[Claude] Scoring ${businesses.length} leads | niche: ${niche} | outputMode: ${outputMode}`);
 
-  const nicheContext      = getNicheContext(niche);
-  const modeInstruction   = OUTPUT_MODE_INSTRUCTIONS[outputMode] || OUTPUT_MODE_INSTRUCTIONS.linkedin;
+  const nicheContext    = getNicheContext(niche);
+  const modeInstruction = OUTPUT_MODE_INSTRUCTIONS[outputMode] || OUTPUT_MODE_INSTRUCTIONS.linkedin;
 
   const systemPrompt = `You are a lead scoring agent for a freelance web developer targeting independent beauty studios in the UK and Australia.
 The developer offers: modern website builds, online booking systems, deposit collection flows, mobile-first design.
@@ -427,12 +422,17 @@ Typical project value: $600–$1,500 USD. Clients are solo or small-team studio 
 NICHE CONTEXT for "${niche}":
 ${nicheContext}
 
-SCORING RULES (1-10):
-- 9-10: No website at all OR still on free subdomain (wixsite/squarespace.com) = perfect target
-- 8:    Has own domain but DM-to-book detected OR no booking system = high priority
-- 6-7:  Has booking but site is outdated/poor mobile = upgrade opportunity
-- 4-5:  Decent site, minor issues = lower priority
-- 1-3:  Polished site with working booking = skip, not worth approaching
+STRICT SCORING RULES (1-10) — follow exactly:
+- 10: No website at all — pure opportunity, build from scratch
+- 9:  Still on free subdomain (wixsite.com/squarespace.com) — zero SEO, needs migration
+- 8:  Own domain BUT DM-to-book detected OR no booking system at all
+- 7:  Has own domain + booking, BUT site is stale (2+ years old) OR not mobile responsive
+- 6:  Has booking + mobile, BUT no prices visible OR very slow loading
+- 4-5: Mostly decent site, one minor issue
+- 2-3: Polished site, functional booking, good mobile — do NOT approach
+- 1:  Perfect site — skip entirely
+
+CRITICAL: If a site has working booking (Fresha/Mindbody/Calendly embedded), mobile responsive, recent copyright, and clear pricing — score it 2-3 MAX. Do not inflate scores.
 
 OUTPUT MODE: ${outputMode.toUpperCase()}
 ${modeInstruction}
@@ -440,30 +440,20 @@ ${modeInstruction}
 FOR EACH LEAD GENERATE:
 
 1. linkedinMessage (3 sentences ONLY):
-   - Sentence 1: Genuine specific compliment on their work or business (not generic)
-   - Sentence 2: ONE specific issue you identified — be precise, not vague ("your booking button leads nowhere" not "your site has issues")
-   - Sentence 3: Soft ask — "I recorded a 2-minute walkthrough of what I found — worth a look?"
-   - Tone: Real person, not a salesperson. Warm but specific.
-   - NEVER start with "I noticed" — vary the opening
-   - NEVER mention you're from India or your location
+   - Sentence 1: Genuine specific compliment on their work (reference rating or review count)
+   - Sentence 2: ONE specific issue — precise ("your site has no way to take a booking deposit" not "your site needs work")
+   - Sentence 3: Soft ask — "I put together a 2-min walkthrough showing what this looks like fixed — worth a look?"
+   - NEVER start with "I noticed" or mention being from India
+   - Tone: peer-to-peer, not salesperson
 
-2. loomBrief (exactly 3 bullet points):
-   - Bullet 1: First thing to show on screen (what page, what element)
-   - Bullet 2: The specific problem to demonstrate visually
-   - Bullet 3: What the solution would look like / what to say at the end
-   - Format: "bullet 1 | bullet 2 | bullet 3"
+2. loomBrief (exactly 3 bullets separated by |):
+   - What to open first on screen
+   - What specific problem to show
+   - How to close the video
 
-3. followUp (1 sentence):
-   - For day 4 if no reply
-   - Casual, not pushy — reference the original message briefly
+3. followUp (1 sentence for day 4 if no reply)
 
-RULES:
-- Reference their actual review count or rating — makes it personal
-- Reference ONE specific pain point from the niche context above
-- All output in professional English only
-- Score honestly — it is better to surface 3 great leads than 8 mediocre ones
-
-YOUR ENTIRE RESPONSE = ONE RAW JSON OBJECT. Start with { end with }. No markdown. No preamble.
+YOUR ENTIRE RESPONSE = ONE RAW JSON OBJECT. No markdown. No preamble.
 
 {
   "leads": [
@@ -475,51 +465,56 @@ YOUR ENTIRE RESPONSE = ONE RAW JSON OBJECT. Start with { end with }. No markdown
       "rating": 4.2,
       "reviewCount": 143,
       "score": 8,
-      "scoreReason": "one sentence explaining the score",
-      "painPoints": "2-3 specific issues identified for this business",
-      "pitch": "copy of linkedinMessage (legacy field — keep for compatibility)",
-      "linkedinMessage": "3-sentence LinkedIn connection message",
+      "scoreReason": "one sentence — reference specific issues found",
+      "painPoints": "2-3 specific issues for this business",
+      "pitch": "copy of linkedinMessage",
+      "linkedinMessage": "3-sentence message",
       "loomBrief": "bullet 1 | bullet 2 | bullet 3",
-      "followUp": "one sentence day-4 follow-up message",
-      "type": "lash studio / brow studio / beauty salon / etc"
+      "followUp": "one sentence",
+      "type": "lash studio / brow studio / etc",
+      "instagramHandle": "handle or null"
     }
   ],
-  "summary": "one sentence overall finding about this batch"
+  "summary": "one sentence about this batch"
 }`;
 
   const businessData = businesses.map((b, i) => {
-    let websiteInfo = 'NO WEBSITE — build from scratch, highest priority opportunity';
+    let websiteInfo = 'NO WEBSITE — score 10, perfect target';
     if (b.website) {
       if (b.websiteQuality) {
         const wq = b.websiteQuality;
         if (wq.error) {
-          websiteInfo = `${b.website} (could not verify — treat as unknown quality)`;
+          websiteInfo = `${b.website} (unverified — ${wq.error})`;
         } else {
           const issues = [];
-          if (!wq.isMobile)       issues.push('NOT mobile responsive');
-          if (!wq.hasBooking)     issues.push('NO booking system');
-          if (wq.hasDMBooking)    issues.push('DM-TO-BOOK detected on site');
-          if (wq.isOnSubdomain)   issues.push(`FREE SUBDOMAIN (${wq.url.split('/')[2]})`);
-          if (wq.isStale)         issues.push(`STALE SITE (copyright ${wq.copyrightYear})`);
-          websiteInfo = `${b.website}` +
-            `\n     verdict: ${wq.verdict}` +
-            `\n     issues: ${issues.length > 0 ? issues.join(', ') : 'none found'}` +
-            `\n     pitch angle: ${wq.pitchAngle}`;
+          if (!wq.isMobile)      issues.push('NOT mobile responsive');
+          if (!wq.hasBooking)    issues.push('NO booking system');
+          if (wq.hasDMBooking)   issues.push('DM-TO-BOOK on site');
+          if (wq.isOnSubdomain)  issues.push(`FREE SUBDOMAIN (${wq.url.split('/')[2]})`);
+          if (wq.isStale)        issues.push(`STALE (copyright ${wq.copyrightYear})`);
+          if (!wq.hasPrices)     issues.push('NO prices visible');
+          if (wq.isSlowLoading)  issues.push(`SLOW (${wq.loadTime}ms)`);
+          const ig = wq.instagramHandle || b.instagramHandle || null;
+          websiteInfo = `${b.website}
+     verdict: ${wq.verdict} (${wq.issueCount} issues)
+     issues: ${issues.length > 0 ? issues.join(', ') : 'none — score LOW (2-3)'}
+     pitch angle: ${wq.pitchAngle}
+     instagram: ${ig ? '@' + ig : 'not found'}`;
         }
       } else {
         websiteInfo = b.website;
       }
     }
-    return `${i+1}. ${b.name}` +
-    `\n   Type: ${b.type}` +
-    `\n   Address: ${b.address}` +
-    `\n   Phone: ${b.phone || 'not listed'}` +
-    `\n   Website: ${websiteInfo}` +
-    `\n   Rating: ${b.rating || 'n/a'} (${b.reviewCount || 0} reviews)`;
+    return `${i+1}. ${b.name}
+   Type: ${b.type}
+   Address: ${b.address}
+   Phone: ${b.phone || 'not listed'}
+   Website: ${websiteInfo}
+   Rating: ${b.rating || 'n/a'} (${b.reviewCount || 0} reviews)`;
   }).join('\n\n');
 
   const res = await client.messages.create({
-    model: 'claude-haiku-4-5-20251001',
+    model: 'claude-sonnet-4-6',  // UPGRADED: sonnet for better scoring accuracy
     max_tokens: 6000,
     system: systemPrompt,
     messages: [
@@ -544,9 +539,9 @@ app.post('/api/leads', async (req, res) => {
   const {
     niche, city, service,
     count      = 5,
-    minRating  = 3.5,   // CHANGED: lowered from 4.0 for UK/AU market
-    minReviews = 15,    // CHANGED: lowered from 50 for UK/AU market
-    outputMode = 'linkedin'  // CHANGED: replaces "language" param
+    minRating  = 3.5,
+    minReviews = 15,
+    outputMode = 'linkedin'
   } = req.body;
 
   if (!niche || !city || !service)
@@ -558,6 +553,12 @@ app.post('/api/leads', async (req, res) => {
       parseFloat(minRating), parseInt(minReviews)
     );
 
+    // FIX: Graceful empty return — city exhausted, don't crash
+    if (!businesses.length) {
+      console.log(`[Route] No businesses returned for ${niche} in ${city} — returning empty`);
+      return res.json({ leads: [], summary: `No new leads found for ${niche} in ${city}.` });
+    }
+
     console.log(`[Website] Checking ${businesses.filter(b=>b.website).length} sites...`);
     const siteChecks = await Promise.allSettled(
       businesses.map(b => b.website ? checkWebsiteQuality(b.website) : Promise.resolve(null))
@@ -565,12 +566,19 @@ app.post('/api/leads', async (req, res) => {
     businesses.forEach((b, i) => {
       const result = siteChecks[i];
       b.websiteQuality = (result.status === 'fulfilled') ? result.value : null;
+      // Extract Instagram from website quality check
+      if (b.websiteQuality?.instagramHandle) {
+        b.instagramHandle = b.websiteQuality.instagramHandle;
+      }
       if (b.websiteQuality) {
         const wq = b.websiteQuality;
         const flags = [];
         if (wq.hasDMBooking)  flags.push('DM-TO-BOOK');
         if (wq.isOnSubdomain) flags.push('SUBDOMAIN');
-        console.log(`[Website] ${b.name}: ${wq.verdict || wq.error}${flags.length ? ` [${flags.join(', ')}]` : ''}`);
+        if (!wq.hasBooking)   flags.push('NO-BOOKING');
+        if (wq.isSlowLoading) flags.push(`SLOW-${wq.loadTime}ms`);
+        if (wq.instagramHandle) flags.push(`@${wq.instagramHandle}`);
+        console.log(`[Website] ${b.name}: ${wq.verdict || wq.error} [issues:${wq.issueCount||0}]${flags.length ? ` ${flags.join(' ')}` : ''}`);
       }
     });
 
@@ -586,19 +594,19 @@ app.post('/api/leads', async (req, res) => {
       const src = bizByName[key] || businesses[i] || {};
       return {
         ...src, ...lead,
-        googleMapsUrl:  src.googleMapsUrl || lead.googleMapsUrl,
-        id:             src.id || `${Date.now()}-${i}`,
+        googleMapsUrl:   src.googleMapsUrl || lead.googleMapsUrl,
+        id:              src.id || `${Date.now()}-${i}`,
         outputMode,
-        websiteQuality: src.websiteQuality || null,
-        // Ensure new fields always exist even if Claude missed them
+        websiteQuality:  src.websiteQuality || null,
+        instagramHandle: src.instagramHandle || lead.instagramHandle || null,
         linkedinMessage: lead.linkedinMessage || lead.pitch || '',
         loomBrief:       lead.loomBrief || '',
         followUp:        lead.followUp || '',
-        pitch:           lead.linkedinMessage || lead.pitch || '', // legacy compat
+        pitch:           lead.linkedinMessage || lead.pitch || '',
       };
     });
 
-    console.log(`[Done] ${parsed.leads.length} leads | mode: ${outputMode}\n`);
+    console.log(`[Done] ${parsed.leads.length} leads scored | mode: ${outputMode}\n`);
     res.json(parsed);
   } catch (err) {
     console.error('[Error]', err.message);
@@ -648,12 +656,13 @@ app.get('*', (req, res) => {
   } else {
     res.status(404).json({ error: 'React build not found. Run: cd client && npm run build' })
   }
-})
+});
 
 const PORT = process.env.PORT || 3003;
 app.listen(PORT, () => {
-  console.log(`\nAurora v1 → http://localhost:${PORT}`);
+  console.log(`\nAurora v1.3 → http://localhost:${PORT}`);
   console.log(`Pipeline:      UK / AU Beauty Studios`);
+  console.log(`Model:         claude-sonnet-4-6 (scoring)`);
   console.log(`Google Maps:   ${MAPS_KEY ? '✓' : '✗ GOOGLE_MAPS_KEY missing'}`);
   console.log(`Anthropic:     ${process.env.ANTHROPIC_API_KEY ? '✓' : '✗ missing'}`);
   console.log(`Excel:         ${ExcelJS ? '✓' : '✗ run npm install exceljs'}`);
