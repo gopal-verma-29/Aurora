@@ -1,4 +1,4 @@
-// server.js — Aurora v1.3 (UK/AU beauty studio pipeline)
+// server.js — Aurora v1.4 (UK/AU beauty studio pipeline)
 //
 // CHANGES FROM v1.0:
 //   1. City exhausted → returns empty gracefully instead of crashing
@@ -513,25 +513,69 @@ YOUR ENTIRE RESPONSE = ONE RAW JSON OBJECT. No markdown. No preamble.
    Rating: ${b.rating || 'n/a'} (${b.reviewCount || 0} reviews)`;
   }).join('\n\n');
 
-  const res = await client.messages.create({
-    model: 'claude-sonnet-4-6',  // UPGRADED: sonnet for better scoring accuracy
-    max_tokens: 6000,
-    system: systemPrompt,
-    messages: [
-      { role: 'user', content: `Businesses:\n\n${businessData}\n\nService offered: ${service}\n\nReturn only JSON.` },
-      { role: 'assistant', content: '{' }
-    ]
-  });
+  // FIX: Retry logic — Haiku occasionally returns malformed JSON under load.
+  // Try up to 3 times before giving up. Each retry is a fresh call, not a repair attempt.
+  const MAX_ATTEMPTS = 3;
+  let parsed = null;
+  let lastRawJSON = '';
 
-  const rawJSON = '{' + res.content.filter(b=>b.type==='text').map(b=>b.text).join('').trim();
-  console.log('[Claude] Response (first 300):\n', rawJSON.slice(0,300));
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await client.messages.create({
+        model: 'claude-haiku-4-5-20251001', // haiku — fast, cheap, all API tiers
+        max_tokens: 6000,
+        system: systemPrompt,
+        messages: [
+          { role: 'user', content: `Businesses:\n\n${businessData}\n\nService offered: ${service}\n\nReturn only JSON.` },
+          { role: 'assistant', content: '{' }
+        ]
+      });
 
-  let parsed;
-  try { parsed = JSON.parse(rawJSON); } catch {}
-  if (!parsed) { try { parsed = JSON.parse(rawJSON.replace(/```json\s*/gi,'').replace(/```\s*/g,'').trim()); } catch {} }
-  if (!parsed) { const m = rawJSON.match(/\{[\s\S]*\}/); if (m) { try { parsed = JSON.parse(m[0]); } catch {} } }
+      const rawJSON = '{' + res.content.filter(b=>b.type==='text').map(b=>b.text).join('').trim();
+      lastRawJSON = rawJSON;
+
+      if (attempt === 1) {
+        console.log('[Claude] Response (first 300):\n', rawJSON.slice(0,300));
+      } else {
+        console.log(`[Claude] Retry ${attempt} response (first 200):`, rawJSON.slice(0,200));
+      }
+
+      // Try 4 parsing strategies in order
+      try { parsed = JSON.parse(rawJSON); } catch {}
+      if (!parsed) { try { parsed = JSON.parse(rawJSON.replace(/```json\s*/gi,'').replace(/```\s*/g,'').trim()); } catch {} }
+      if (!parsed) { const m = rawJSON.match(/\{[\s\S]*\}/); if (m) { try { parsed = JSON.parse(m[0]); } catch {} } }
+      // NEW 4th strategy: trim trailing garbage after the last valid closing brace
+      if (!parsed) {
+        const lastBrace = rawJSON.lastIndexOf('}');
+        if (lastBrace > -1) {
+          try { parsed = JSON.parse(rawJSON.slice(0, lastBrace + 1)); } catch {}
+        }
+      }
+
+      // Validate it actually has a leads array — not just valid JSON shape
+      if (parsed && Array.isArray(parsed.leads)) {
+        if (attempt > 1) console.log(`[Claude] Succeeded on retry ${attempt}`);
+        break; // success — exit retry loop
+      } else {
+        parsed = null; // treat as failure, retry
+        console.warn(`[Claude] Attempt ${attempt} parsed but missing valid leads array — retrying`);
+      }
+
+    } catch (apiErr) {
+      console.error(`[Claude] Attempt ${attempt} API call failed:`, apiErr.message);
+    }
+
+    // Brief pause before retry — avoids hammering API on transient issues
+    if (attempt < MAX_ATTEMPTS) await new Promise(r => setTimeout(r, 1500));
+  }
+
+  if (!parsed) {
+    console.error('[Claude] All attempts failed. Last raw response:', lastRawJSON.slice(0, 500));
+  }
+
   return parsed;
 }
+
 
 // ─── ROUTES ───────────────────────────────────────────────────────────────────
 
@@ -583,8 +627,22 @@ app.post('/api/leads', async (req, res) => {
     });
 
     const parsed = await analyseLeads(businesses, service, niche, outputMode);
-    if (!parsed?.leads?.length)
-      return res.status(500).json({ error: 'Could not score leads. Check terminal.' });
+
+    // FIX: Graceful fallback instead of 500 crash.
+    // If Claude truly failed after 3 retries, return empty leads (not an error).
+    // This lets n8n continue to the next scan instead of stopping the whole workflow.
+    if (!parsed || !Array.isArray(parsed.leads)) {
+      console.error(`[Route] Scoring failed completely for ${niche} in ${city} after retries — returning empty`);
+      return res.json({
+        leads: [],
+        summary: `Scoring failed for ${niche} in ${city} after 3 attempts — skipped this batch.`
+      });
+    }
+
+    // Empty leads array is valid too (e.g. "all leads polished, none qualify")
+    if (!parsed.leads.length) {
+      return res.json(parsed);
+    }
 
     const bizByName = {};
     businesses.forEach(b => { bizByName[b.name.toLowerCase().trim()] = b; });
@@ -660,7 +718,7 @@ app.get('*', (req, res) => {
 
 const PORT = process.env.PORT || 3003;
 app.listen(PORT, () => {
-  console.log(`\nAurora v1.3 → http://localhost:${PORT}`);
+  console.log(`\nAurora v1.4 → http://localhost:${PORT}`);
   console.log(`Pipeline:      UK / AU Beauty Studios`);
   console.log(`Model:         claude-sonnet-4-6 (scoring)`);
   console.log(`Google Maps:   ${MAPS_KEY ? '✓' : '✗ GOOGLE_MAPS_KEY missing'}`);
