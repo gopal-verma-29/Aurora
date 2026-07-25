@@ -804,6 +804,11 @@ app.post('/api/leads', async (req, res) => {
         phone,
         // callTag: drop {{lead.callTag}} into your n8n Telegram template to include phone
         callTag:         phone ? `📞 ${phone}` : null,
+        // has_booking: tri-state fact, not a judgment call. No website at all -> confidently
+        // false (nothing to book through). Website exists but the quality check itself
+        // failed/errored -> null, genuinely unknown, don't guess. Otherwise -> whatever
+        // checkWebsiteQuality's own keyword-detection already found (hasBooking above).
+        has_booking:     !src.website ? false : (src.websiteQuality?.error ? null : !!src.websiteQuality?.hasBooking),
         linkedinMessage: lead.linkedinMessage || lead.pitch || '',
         loomBrief:       lead.loomBrief || '',
         followUp:        lead.followUp || '',
